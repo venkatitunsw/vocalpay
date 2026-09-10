@@ -3,7 +3,12 @@ import time
 import stripe
 
 def init_stripe():
-    key = os.getenv("STRIPE_SECRET_KEY")
+    # Strip whitespace defensively — a trailing newline is a common artifact
+    # of pasting a secret into a dashboard's env var field, and Stripe's HTTP
+    # client rejects it outright ("Invalid header value") rather than
+    # trimming it, which otherwise surfaces as a confusing network error deep
+    # inside every Stripe call instead of at startup where the cause is clear.
+    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not key:
         raise RuntimeError("Missing STRIPE_SECRET_KEY in environment/.env")
     stripe.api_key = key
