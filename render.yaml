@@ -1,0 +1,24 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploys VocalPay as a single free web service: FastAPI serves both the API
+# and the static frontend (see the StaticFiles mount at the bottom of
+# main.py), so there's exactly one URL for the whole demo.
+#
+# SQLite lives on the service's local disk. The free plan has no persistent
+# disk, so the database resets to a fresh, fully-seeded state (demo user, PIN
+# 1234, 200-entry PayID directory) on every deploy and whenever the free
+# service spins down from inactivity and cold-starts again — fine for a demo,
+# not for anything that needs data to survive restarts. Attach a paid
+# persistent disk later if that matters.
+services:
+  - type: web
+    name: vocalpay
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: STRIPE_SECRET_KEY
+        sync: false # set this manually in the Render dashboard — never committed to git
