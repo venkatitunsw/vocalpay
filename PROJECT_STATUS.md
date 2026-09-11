@@ -75,6 +75,10 @@ having to match an exact format:
   `"for <target>"` payee match).
 - The target group also accepts digits/spaces, so a PayID (`"Pay 12 to 0412 345 678"`) resolves the same way
   a name would (see §4a).
+- **No preposition at all** — `"Send John 12 aud"` / `"Pay Smith 20"` — is a fourth fallback: when none of
+  `to`/`on account`/`for` appear, the target is whatever sits between the verb and the first number in the
+  string, and the amount is resolved from that point onward exactly like the other paths (still "last number
+  wins", so `"Send John 12, no 15 aud"` correctly resolves to 15).
 
 Still requires the sentence to open with `pay`/`send`/`transfer` — everything after that is now
 format-tolerant. Covered by unit tests in [tests/test_vocalpay.py](tests/test_vocalpay.py) (`test_parser_*`)

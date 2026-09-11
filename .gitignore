@@ -14,3 +14,6 @@ __pycache__/
 # OS/editor cruft
 .DS_Store
 Thumbs.db
+
+# Claude Code local session state
+.claude/

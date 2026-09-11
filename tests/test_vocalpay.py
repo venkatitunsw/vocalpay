@@ -626,6 +626,33 @@ def test_parser_understands_parenthetical_payid_qualifier():
     assert result.intent.payee_name == "0427 499 675"
 
 
+def test_parser_understands_no_preposition_phrasing():
+    result = parse_text_command("Send John 12 aud")
+    assert result.ok is True
+    assert result.intent.amount == 12.0
+    assert result.intent.payee_name == "John"
+
+
+def test_parser_no_preposition_with_self_correction():
+    result = parse_text_command("Send John 12, no 15 aud")
+    assert result.ok is True
+    assert result.intent.amount == 15.0
+    assert result.intent.payee_name == "John"
+
+
+def test_flexible_phrasing_no_preposition_works_end_to_end(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    session_id = _new_session(client)
+    _add_contact(client, "John")
+    _add_default_payment_method(client)
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Send John 12 aud"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["intent"]["amount"] == 12.0
+    assert body["intent"]["payee_name"] == "John"
+
+
 def test_parser_still_handles_original_template():
     result = parse_text_command("Pay 12 to John for dinner")
     assert result.ok is True

@@ -48,6 +48,7 @@ def parse_text_command(text: str) -> ParseResult:
       - "Pay 12 to 0412 345 678"                      (PayID instead of a name)
       - "Pay 4 to Ava Hill PayID: 0427 499 675"        (name + explicit PayID disambiguates which one)
       - "Pay 4 to Ava Hill (0427 499 675)"
+      - "Send John 12 aud"                             (no preposition at all: verb, name, amount)
     """
     if not text or len(text.strip()) < 3:
         return ParseResult(False, error="Empty or too short command")
@@ -71,6 +72,18 @@ def parse_text_command(text: str) -> ParseResult:
         m = FOR_TARGET_RE.search(raw)
         if m:
             target, target_span = m.group("target").strip(), m.span()
+
+    if target is None:
+        # No preposition at all — "Send John 12 aud" / "Pay Smith 20". The
+        # target is whatever sits between the verb and the first number.
+        verb_m = VERB_RE.match(raw)
+        after_verb = raw[verb_m.end():]
+        digit_m = re.search(r"\d", after_verb)
+        if digit_m and digit_m.start() > 0:
+            candidate = after_verb[: digit_m.start()].strip(" ,$")
+            if re.match(r"^[a-zA-Z]", candidate):
+                target = candidate
+                target_span = (verb_m.end(), verb_m.end() + digit_m.start())
 
     if not target:
         return ParseResult(False, error="Could not figure out who to pay. Try: 'Pay 12 to John'")
