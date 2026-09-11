@@ -4,12 +4,14 @@
 # and the static frontend (see the StaticFiles mount at the bottom of
 # main.py), so there's exactly one URL for the whole demo.
 #
-# SQLite lives on the service's local disk. The free plan has no persistent
-# disk, so the database resets to a fresh, fully-seeded state (demo user, PIN
-# 1234, 200-entry PayID directory) on every deploy and whenever the free
-# service spins down from inactivity and cold-starts again — fine for a demo,
-# not for anything that needs data to survive restarts. Attach a paid
-# persistent disk later if that matters.
+# Storage: when TURSO_DATABASE_URL is set, db.py routes all queries to a
+# Turso (libSQL) database instead of the local SQLite file — see db.py's
+# _LibsqlConn wrapper. That's what makes data (contacts, payment methods,
+# transactions) survive redeploys and the free plan's cold starts, instead of
+# resetting with the container's ephemeral disk every time. If
+# TURSO_DATABASE_URL is left unset, it falls back to the local SQLite file
+# exactly as before (fine for local dev, but back to resetting on every
+# restart in production).
 services:
   - type: web
     name: vocalpay
@@ -22,3 +24,7 @@ services:
         value: 3.11.9
       - key: STRIPE_SECRET_KEY
         sync: false # set this manually in the Render dashboard — never committed to git
+      - key: TURSO_DATABASE_URL
+        sync: false # e.g. libsql://vocalpay-<your-org>.turso.io — from `turso db show vocalpay --url`
+      - key: TURSO_AUTH_TOKEN
+        sync: false # from `turso db tokens create vocalpay`

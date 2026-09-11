@@ -84,6 +84,34 @@ Still requires the sentence to open with `pay`/`send`/`transfer` — everything 
 format-tolerant. Covered by unit tests in [tests/test_vocalpay.py](tests/test_vocalpay.py) (`test_parser_*`)
 directly against `parse_text_command()`, plus one end-to-end test through `/command/text`.
 
+## 2b. Persistent storage in production (Turso) — new
+
+Render's free plan has no persistent disk: every redeploy, and every cold start after the free service spins
+down from ~15 minutes of inactivity, is a brand-new container with a fresh, empty local filesystem — so the
+SQLite file used to reset to just the seeded demo state (demo user, PIN `1234`, 200-entry PayID directory) on
+every one of those events, losing any contacts/payment methods/transactions added in between.
+
+Fixed by making [db.py](db.py) storage-backend-aware:
+
+- **Locally and in tests**: `get_conn()` behaves exactly as before — a real `sqlite3.Connection` against the
+  local `vocalpay.db` file. Nothing about local dev or the test suite changed.
+- **In production**: when `TURSO_DATABASE_URL` (and `TURSO_AUTH_TOKEN`) are set, `get_conn()` instead returns
+  `_LibsqlConn`, a thin wrapper around a single shared [Turso](https://turso.tech) (libSQL) client for the
+  whole process — Turso is SQLite-wire-compatible, so no SQL anywhere else in the codebase needed to change.
+  The wrapper adapts the four methods every repo file actually calls (`execute`/`executemany`/`executescript`/
+  `commit`/`close`) and converts result rows to plain `dict`s so `dict(row)` and `row["col"]` keep working
+  unchanged everywhere. `commit()`/`close()` are no-ops — libsql commits each statement as it runs, and the
+  client is a long-lived shared resource rather than something opened and torn down per call the way a local
+  SQLite connection is.
+- `executescript()` (used once, by `init_db()` to apply `schema.sql`) strips `--` line comments before
+  splitting on `;`, since libsql needs each statement executed individually and schema.sql's comments
+  occasionally contain a literal `;` themselves (e.g. `"1 = saved contact; 0 = auto-provisioned"`), which a
+  naive split would otherwise cut in the wrong place.
+- Free tier, indefinitely: Turso's free plan (500 databases, several GB storage) needs no credit card and
+  doesn't expire the way some "free trial" database offers do.
+- `render.yaml` declares `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` as `sync: false` env vars (set manually in
+  the Render dashboard, never committed) alongside `STRIPE_SECRET_KEY`.
+
 ## 3a. Duplicate contact names — same person vs. different person — new
 
 Two different PayIDs can legitimately resolve to the same display name — either genuinely (a home and a work
