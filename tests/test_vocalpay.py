@@ -839,6 +839,18 @@ def test_support_chat_missing_api_key_surfaces_clear_error(client, monkeypatch):
     assert "SUPPORT_CHAT_FAILED" in [e["event_type"] for e in events]
 
 
+def test_extract_text_handles_stringified_content_blocks():
+    # Observed live: langchain-google-genai sometimes returns AIMessage.content
+    # as a real list of typed blocks, and sometimes (inconsistently) as an
+    # already-stringified repr of that same list -- both must resolve to just
+    # the human-readable text, never leaking internal signature/metadata.
+    real_list = [{"type": "text", "text": "Hello there!", "extras": {"signature": "abc"}}]
+    stringified = str(real_list)
+    assert support_chat._extract_text(real_list) == "Hello there!"
+    assert support_chat._extract_text(stringified) == "Hello there!"
+    assert support_chat._extract_text("Plain string reply") == "Plain string reply"
+
+
 def test_support_chat_history_persists_per_user_not_per_session(client):
     from users_repo import DEMO_USER_ID
 

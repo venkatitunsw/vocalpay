@@ -1,3 +1,4 @@
+import ast
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -11,7 +12,7 @@ from payees_repo import find_payees_by_name
 from transactions_repo import list_recent_transactions, get_transaction
 from stripe_service import get_account_balance
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 SYSTEM_PROMPT = (
     "You are VocalPay's customer support assistant. Answer questions about the user's contacts, "
@@ -163,10 +164,37 @@ def get_support_reply(user_id: str, message: str) -> str:
     agent = _get_agent()
     history = _load_history(user_id)
     result = agent.invoke({"messages": history + [HumanMessage(content=message)]})
-    reply = result["messages"][-1].content
-    if not isinstance(reply, str):
-        reply = str(reply)
+    reply = _extract_text(result["messages"][-1].content)
 
     _save_message(user_id, "human", message)
     _save_message(user_id, "ai", reply)
     return reply
+
+
+def _extract_text(content) -> str:
+    """
+    Newer Gemini models return `content` as a list of typed blocks (text,
+    plus internal reasoning/signature metadata) — sometimes as a real Python
+    list, sometimes (observed with gemini-3.6-flash via langchain-google-genai
+    0.4.4, seemingly depending on whether a tool was called first) already
+    stringified into that list's repr. Either way, pull out just the text
+    blocks so internal metadata/signatures never leak into what the user
+    sees or what gets persisted as chat history.
+    """
+    if isinstance(content, str) and content.strip().startswith("[{"):
+        try:
+            content = ast.literal_eval(content)
+        except (ValueError, SyntaxError):
+            pass  # not actually a stringified block list -- fall through and use it as-is
+
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        joined = "".join(parts).strip()
+        if joined:
+            return joined
+        return str(content)
+
+    return content if isinstance(content, str) else str(content)
