@@ -86,6 +86,21 @@ CREATE TABLE IF NOT EXISTS confirmations (
 
 CREATE INDEX IF NOT EXISTS idx_confirmations_txn ON confirmations(txn_id);
 
+-- Support chatbot conversation history — per user (not per session), so the
+-- assistant remembers past conversations across visits. role is "human" or
+-- "ai"; tool-call/tool-result turns aren't persisted, only the final
+-- human-readable exchange.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  message_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created ON chat_messages(user_id, created_at);
+
 -- External PayID registry (simulates a bank-network-style directory): any
 -- number here is a "valid" PayID that resolves to a registered name, whether
 -- or not the current user has saved them as a contact yet.

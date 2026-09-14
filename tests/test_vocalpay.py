@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import db as db_module
 import main
+import support_chat
 from intent_parser import parse_text_command
 
 
@@ -797,3 +798,56 @@ def test_exact_name_match_wins_over_ambiguous_shorthand(client, monkeypatch):
     body = r.json()
     assert body["ok"] is True
     assert body["intent"]["payee_name"] == "Alice"
+
+
+# --- Support chatbot: LangChain + Gemini agent, mocked (no real API calls) ---
+
+def test_support_chat_returns_reply(client, monkeypatch):
+    monkeypatch.setattr(support_chat, "get_support_reply", lambda user_id, message: "You have no contacts yet.")
+
+    session_id = _new_session(client)
+    r = client.post("/support/chat", json={"session_id": session_id, "message": "Who are my contacts?"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["reply"] == "You have no contacts yet."
+
+    events = client.get(f"/audit/{session_id}/events").json()["events"]
+    event_types = [e["event_type"] for e in events]
+    assert "SUPPORT_CHAT_MESSAGE" in event_types
+    assert "SUPPORT_CHAT_REPLY" in event_types
+
+
+def test_support_chat_rejects_empty_message(client):
+    session_id = _new_session(client)
+    r = client.post("/support/chat", json={"session_id": session_id, "message": "   "})
+    assert r.json() == {"ok": False, "error": "Message is empty"}
+
+
+def test_support_chat_missing_api_key_surfaces_clear_error(client, monkeypatch):
+    def _boom(user_id, message):
+        raise RuntimeError("Missing GEMINI_API_KEY in environment/.env")
+
+    monkeypatch.setattr(support_chat, "get_support_reply", _boom)
+
+    session_id = _new_session(client)
+    r = client.post("/support/chat", json={"session_id": session_id, "message": "hi"})
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "Missing GEMINI_API_KEY in environment/.env"
+
+    events = client.get(f"/audit/{session_id}/events").json()["events"]
+    assert "SUPPORT_CHAT_FAILED" in [e["event_type"] for e in events]
+
+
+def test_support_chat_history_persists_per_user_not_per_session(client):
+    from users_repo import DEMO_USER_ID
+
+    support_chat._save_message(DEMO_USER_ID, "human", "What's my balance?")
+    support_chat._save_message(DEMO_USER_ID, "ai", "You have no payment method on file yet.")
+
+    history = support_chat._load_history(DEMO_USER_ID)
+    assert len(history) == 2
+    assert history[0].content == "What's my balance?"
+    assert history[0].type == "human"
+    assert history[1].content == "You have no payment method on file yet."
+    assert history[1].type == "ai"

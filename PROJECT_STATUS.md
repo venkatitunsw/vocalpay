@@ -40,6 +40,7 @@ Defined in [db/schema.sql](db/schema.sql), applied on startup via `init_db()` in
 | `confirmations` | Pending step-up confirmation for a transaction | `confirmation_id`, `txn_id`, `required_confirmation`, `pin_attempts`, `max_attempts`, `expires_at`, `status` |
 | `audit_events` | Append-only, hash-chained event log | `event_id`, `session_id`, `ts`, `event_type`, `payload_json`, `prev_hash`, `event_hash` |
 | `payid_directory` | Mock external PayID registry (200 seeded rows) — see §4a | `phone_number` (PK, digits-only), `display_number`, `registered_name` |
+| `chat_messages` | Support chatbot conversation history, per-user — see §2c | `message_id`, `user_id`, `role` (`human`/`ai`), `content`, `created_at` |
 
 `payees.is_contact` (new, default `1`): `1` = deliberately saved contact; `0` = auto-provisioned from a direct
 PayID payment, not yet saved — still fully payable and trackable, just hidden from the Setup contacts list
@@ -111,6 +112,38 @@ Fixed by making [db.py](db.py) storage-backend-aware:
   doesn't expire the way some "free trial" database offers do.
 - `render.yaml` declares `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` as `sync: false` env vars (set manually in
   the Render dashboard, never committed) alongside `STRIPE_SECRET_KEY`.
+
+## 2c. Support chatbot — LangChain + Gemini, memory across sessions — new
+
+A second, separate pipeline alongside the deterministic payment flow: when a chat message *doesn't* parse as
+a payment command (`/command/text` returns `ok:false` with no `decision` — i.e. genuinely unparseable, not a
+policy CLARIFY/BLOCK), the frontend automatically hands it to `POST /support/chat` instead of showing a raw
+parser error. This is a deliberate split, not a convenience shortcut:
+
+- **Payments stay 100% deterministic.** The support agent has no ability to create a transaction, confirm a
+  PIN, or touch `/pay/execute` — it's not given those as tools at all. If asked to pay someone, its system
+  prompt instructs it to tell the user to type a payment command instead ("Pay 12 to John"), which still goes
+  through the existing regex parser → policy engine → PIN/CONFIRM flow (§4) untouched. This avoids the real
+  risk of an LLM misreading an amount or payee in a system that moves money.
+- **Grounded, not hallucinated.** [support_chat.py](support_chat.py) gives the agent five read-only tools —
+  `list_contacts`, `recent_transactions`, `transaction_status`, `check_receiver_balance`, and
+  `explain_payment_policy` — each a thin wrapper over the same repo functions the rest of the app uses
+  (`payees_repo`, `transactions_repo.list_recent_transactions()` (new), `stripe_service.get_account_balance()`).
+  The system prompt explicitly instructs it never to guess an amount, status, name, or PayID — always look it
+  up.
+- **Memory persists per-user, not per-session** — a new `chat_messages` table (`db/schema.sql`) stores every
+  turn keyed to the (single, demo) user, not the browser session, so the assistant remembers earlier
+  conversations even after closing the tab or a Render cold start (once Turso persistence, §2b, is wired up).
+  `_load_history()`/`_save_message()` load the last 20 turns as LangChain `HumanMessage`/`AIMessage` objects
+  and append the new exchange after each reply.
+- **Model**: Google Gemini (`gemini-2.5-flash` by default, overridable via `GEMINI_MODEL`) via
+  `langchain-google-genai`, orchestrated with `langchain.agents.create_agent()` (LangChain 1.x's tool-calling
+  agent loop). Requires a `GEMINI_API_KEY` env var (from https://aistudio.google.com/apikey) — the agent, and
+  the Gemini client inside it, are constructed lazily on first use, and a missing key surfaces as a clear
+  `{"ok": false, "error": "Missing GEMINI_API_KEY..."}` rather than crashing the app or the endpoint.
+- Every turn is also audit-logged (`SUPPORT_CHAT_MESSAGE`/`SUPPORT_CHAT_REPLY`/`SUPPORT_CHAT_FAILED`), same as
+  every other action in the app.
+- `render.yaml` declares `GEMINI_API_KEY` as a `sync: false` env var alongside the others.
 
 ## 3a. Duplicate contact names — same person vs. different person — new
 
@@ -473,8 +506,9 @@ intent_parser.py         Regex-based text -> intent parser
 policy.py                decide_next() risk/policy engine
 security.py              PIN hashing/verification (PBKDF2)
 audit.py                 Hash-chained append-only audit log
-db.py                    SQLite connection + schema init + startup column migrations
+db.py                    DB connection (SQLite locally, Turso/libSQL in prod — see §2b) + schema init + migrations
 db/schema.sql            Table definitions (payees + transactions include receiver-evidence columns)
+support_chat.py          LangChain + Gemini support chatbot: read-only tools, per-user DB-persisted memory — see §2c
 users_repo.py            Demo user bootstrap
 payees_repo.py           Payee lookup/existence checks + get_payee() + find_payee_by_phone() + set_payee_connected_account()
 payid_directory_repo.py  200-entry mock external PayID registry: seed_payid_directory(), lookup_payid(), looks_like_payid()
@@ -486,12 +520,11 @@ stripe_service.py        Stripe init, PaymentIntent creation (idempotency + dest
 check_db.py              Dev script: list DB tables
 check_pm.py              Dev script: dump payment_methods
 create_stripe_pm.py      Dev script: seed a Stripe test card/customer
-requirements.txt         Pinned Python dependencies (now UTF-8; includes pytest/httpx)
-vocalpay.db              SQLite database file (runtime data, regenerated on startup)
-.env                     STRIPE_SECRET_KEY (local secrets, keep out of git)
+requirements.txt         Pinned Python dependencies (now UTF-8; includes pytest/httpx/langchain/libsql-client)
+vocalpay.db              Local SQLite database file (dev only — prod uses Turso, see §2b)
+.env                     STRIPE_SECRET_KEY / TURSO_* / GEMINI_API_KEY (local secrets, keep out of git)
 tests/conftest.py        Isolated-DB pytest fixture
-tests/test_vocalpay.py   16 integration tests (happy path, lockout, expiry, tamper, decline, transient fail,
-                         setup, contacts, receiver evidence)
+tests/test_vocalpay.py   45 integration tests (payments, contacts, PayID, duplicate-name resolution, support chat)
 frontend/index.html      Chat UI shell + Setup/Audit tabbed side panel (Tailwind CDN)
 frontend/app.js          All frontend logic: session, chat, confirm cards + PayID, pay execution + receiver
                          evidence, audit panel, setup tab (contacts + balance checks), voice

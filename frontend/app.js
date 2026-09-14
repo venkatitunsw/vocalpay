@@ -128,7 +128,7 @@ async function initSession() {
     sessionBadge.textContent = state.sessionId.slice(0, 8);
     sessionBadge.title = state.sessionId;
     appendAssistantBubble(
-      "Hi, I'm VocalPay. Tell me a payment to make — e.g. “Pay 12 to John for dinner”, or pay a PayID directly, e.g. “Pay 12 to 0412 345 678”."
+      "Hi, I'm VocalPay. Tell me a payment to make — e.g. “Pay 12 to John for dinner”, or pay a PayID directly, e.g. “Pay 12 to 0412 345 678”. You can also just ask me things, like “what was my last payment?” or “who are my contacts?”"
     );
   } catch (err) {
     sessionBadge.textContent = "offline";
@@ -152,7 +152,7 @@ composer.addEventListener("submit", async (e) => {
       method: "POST",
       body: { session_id: state.sessionId, text },
     });
-    handleCommandResponse(res);
+    await handleCommandResponse(res, text);
   } catch (err) {
     appendErrorBubble(`Request failed: ${err.message}`);
   } finally {
@@ -161,21 +161,43 @@ composer.addEventListener("submit", async (e) => {
   }
 });
 
-function handleCommandResponse(res) {
+async function handleCommandResponse(res, originalText) {
   if (!res.ok) {
-    // Parse failure (no `decision`) vs. a policy CLARIFY/BLOCK (has `decision`)
     if (res.decision) {
-      appendErrorBubble(
-        `${res.decision.decision}: ${res.decision.reason}`
-      );
+      // A recognized payment command that was policy CLARIFY/BLOCK'd — not a
+      // parse failure, so this stays as-is rather than going to support chat.
+      appendErrorBubble(`${res.decision.decision}: ${res.decision.reason}`);
     } else {
-      appendErrorBubble(res.error || "Sorry, I couldn't understand that.");
+      // Didn't parse as a payment command at all — hand it to the support
+      // chatbot instead of just showing a raw parser error. It remembers
+      // past conversations and can look up real contacts/transactions, but
+      // never moves money itself.
+      await askSupportChat(originalText);
     }
     return;
   }
 
   appendAssistantBubble(res.read_back);
   renderConfirmationCard(res);
+}
+
+async function askSupportChat(message) {
+  const thinking = appendAssistantBubble("…");
+  try {
+    const res = await api("/support/chat", {
+      method: "POST",
+      body: { session_id: state.sessionId, message },
+    });
+    if (res.ok) {
+      thinking.querySelector("div").textContent = res.reply;
+    } else {
+      thinking.remove();
+      appendErrorBubble(res.error || "Support chat is temporarily unavailable.");
+    }
+  } catch (err) {
+    thinking.remove();
+    appendErrorBubble(`Request failed: ${err.message}`);
+  }
 }
 
 // --- Confirmation card (normal phrase or PIN) -----------------------------------

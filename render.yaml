@@ -28,3 +28,5 @@ services:
         sync: false # e.g. libsql://vocalpay-<your-org>.turso.io — from `turso db show vocalpay --url`
       - key: TURSO_AUTH_TOKEN
         sync: false # from `turso db tokens create vocalpay`
+      - key: GEMINI_API_KEY
+        sync: false # from https://aistudio.google.com/apikey — powers the support chatbot (support_chat.py)

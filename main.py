@@ -95,6 +95,41 @@ def audit_events(session_id: str):
 def audit_verify(session_id: str):
     return verify_session_chain(session_id)
 
+
+class SupportChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+@app.post("/support/chat")
+def support_chat(req: SupportChatRequest):
+    """
+    A LangChain + Gemini support agent, separate from the deterministic
+    payment pipeline below: it can look up the user's real contacts,
+    transactions, and receiver balances via tool calls, and remembers past
+    conversations (persisted per-user in the DB, not per-session) — but it
+    never moves money itself. Real payments always go through
+    /command/text's parser + policy engine + confirmation flow.
+    """
+    message = req.message.strip()
+    if not message:
+        return {"ok": False, "error": "Message is empty"}
+
+    append_event(req.session_id, "SUPPORT_CHAT_MESSAGE", {"message": message})
+    try:
+        from support_chat import get_support_reply
+        reply = get_support_reply(DEMO_USER_ID, message)
+    except RuntimeError as e:
+        append_event(req.session_id, "SUPPORT_CHAT_FAILED", {"error": str(e)})
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        append_event(req.session_id, "SUPPORT_CHAT_FAILED", {"error": str(e)})
+        return {"ok": False, "error": "Support chat is temporarily unavailable.", "details": str(e)}
+
+    append_event(req.session_id, "SUPPORT_CHAT_REPLY", {"reply": reply})
+    return {"ok": True, "reply": reply}
+
+
 class TextCommandRequest(BaseModel):
     session_id: str
     text: str
