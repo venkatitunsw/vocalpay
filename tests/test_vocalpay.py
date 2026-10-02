@@ -599,6 +599,23 @@ def test_parser_understands_possessive_account_phrasing():
     assert result.intent.payee_name == "Alice"
 
 
+def test_parser_self_correction_stated_after_payee():
+    # "Pay 20 to Dave... wait make it 35 for the pizza" -- a correction
+    # stated AFTER the payee, not just before it.
+    result = parse_text_command("Pay 20 bucks to Dave... wait make it 35 for the pizza")
+    assert result.ok is True
+    assert result.intent.amount == 35.0
+    assert result.intent.payee_name == "Dave"
+    assert result.intent.note == "the pizza"
+
+
+def test_parser_note_numbers_dont_get_mistaken_for_correction():
+    result = parse_text_command("Pay 12 to John for 2 drinks")
+    assert result.ok is True
+    assert result.intent.amount == 12.0
+    assert result.intent.note == "2 drinks"
+
+
 def test_parser_self_correction_last_amount_wins():
     result = parse_text_command("Pay 20, no 30 to Smith")
     assert result.ok is True
@@ -839,6 +856,158 @@ def test_support_chat_missing_api_key_surfaces_clear_error(client, monkeypatch):
     assert "SUPPORT_CHAT_FAILED" in [e["event_type"] for e in events]
 
 
+# --- Recurring/scheduled payments ---
+
+def test_create_payid_schedule_and_process_due(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    _add_contact(client, "Nora")
+    _add_default_payment_method(client)
+    payees = client.get("/payees").json()["payees"]
+    payee_id = payees[0]["payee_id"]
+
+    r = client.post(
+        "/recurring/schedules",
+        json={"payment_rail": "payid", "target_identifier": payee_id, "amount_cents": 2000, "cadence": "weekly"},
+    )
+    body = r.json()
+    assert body["ok"] is True
+    schedule_id = body["schedule_id"]
+
+    schedules = client.get("/recurring/schedules").json()["schedules"]
+    assert len(schedules) == 1
+    assert schedules[0]["status"] == "active"
+
+    session_id = _new_session(client)
+    r2 = client.post("/recurring/process_due", json={"session_id": session_id})
+    body2 = r2.json()
+    assert body2["ok"] is True
+    assert len(body2["processed"]) == 1
+    assert body2["processed"][0]["ok"] is True
+
+    from transactions_repo import get_transaction
+    txn = get_transaction(body2["processed"][0]["txn_id"])
+    assert txn["status"] == "succeeded"
+
+    # next_run_at advanced -> immediately re-processing finds nothing due.
+    r3 = client.post("/recurring/process_due", json={"session_id": session_id})
+    assert r3.json()["processed"] == []
+
+
+def test_create_bpay_schedule_and_process_due(client):
+    client.post("/bpay/billers/save", json={"nickname": "My Power", "biller_code": "111999", "crn": "79927398713"})
+    billers = client.get("/bpay/billers").json()["billers"]
+    biller_id = billers[0]["biller_id"]
+
+    r = client.post(
+        "/recurring/schedules",
+        json={"payment_rail": "bpay", "target_identifier": biller_id, "amount_cents": 5000, "cadence": "monthly"},
+    )
+    assert r.json()["ok"] is True
+
+    session_id = _new_session(client)
+    r2 = client.post("/recurring/process_due", json={"session_id": session_id})
+    body2 = r2.json()
+    assert len(body2["processed"]) == 1
+    assert body2["processed"][0]["ok"] is True
+
+
+def test_schedule_with_unknown_payee_is_rejected(client):
+    r = client.post(
+        "/recurring/schedules",
+        json={"payment_rail": "payid", "target_identifier": "nonexistent", "amount_cents": 1000, "cadence": "weekly"},
+    )
+    assert r.json() == {"ok": False, "error": "Unknown payee_id"}
+
+
+def test_schedule_pause_stops_processing(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    _add_contact(client, "Omar")
+    _add_default_payment_method(client)
+    payee_id = client.get("/payees").json()["payees"][0]["payee_id"]
+
+    schedule_id = client.post(
+        "/recurring/schedules",
+        json={"payment_rail": "payid", "target_identifier": payee_id, "amount_cents": 1500, "cadence": "weekly"},
+    ).json()["schedule_id"]
+
+    client.post(f"/recurring/schedules/{schedule_id}/status", json={"status": "paused"})
+
+    session_id = _new_session(client)
+    r = client.post("/recurring/process_due", json={"session_id": session_id})
+    assert r.json()["processed"] == []
+
+
+def test_normalize_spoken_numbers_converts_digit_word_runs():
+    from voice_service import normalize_spoken_numbers
+    assert normalize_spoken_numbers("Send 15 to oh four one two, three four five, six seven eight") == "Send 15 to 0412345678"
+    assert normalize_spoken_numbers("I have one apple and two oranges") == "I have one apple and two oranges"
+
+
+# --- Local voice transcription (faster-whisper) -- model mocked, no real download/inference ---
+
+def test_voice_transcribe_returns_text(client, monkeypatch):
+    import voice_service
+    monkeypatch.setattr(voice_service, "transcribe_audio_bytes", lambda audio_bytes, suffix=".wav": "pay twelve to john")
+
+    session_id = _new_session(client)
+    r = client.post(
+        "/voice/transcribe",
+        data={"session_id": session_id},
+        files={"audio": ("clip.wav", b"fake-wav-bytes", "audio/wav")},
+    )
+    body = r.json()
+    assert body["ok"] is True
+    assert body["text"] == "pay twelve to john"
+
+    events = client.get(f"/audit/{session_id}/events").json()["events"]
+    assert "VOICE_TRANSCRIBE_SUCCESS" in [e["event_type"] for e in events]
+
+
+def test_voice_transcribe_rejects_empty_audio(client):
+    session_id = _new_session(client)
+    r = client.post(
+        "/voice/transcribe",
+        data={"session_id": session_id},
+        files={"audio": ("clip.wav", b"", "audio/wav")},
+    )
+    assert r.json() == {"ok": False, "error": "No audio received"}
+
+
+def test_voice_transcribe_handles_backend_failure(client, monkeypatch):
+    import voice_service
+
+    def _boom(audio_bytes, suffix=".wav"):
+        raise RuntimeError("model failed to load")
+
+    monkeypatch.setattr(voice_service, "transcribe_audio_bytes", _boom)
+    session_id = _new_session(client)
+    r = client.post(
+        "/voice/transcribe",
+        data={"session_id": session_id},
+        files={"audio": ("clip.wav", b"fake-wav-bytes", "audio/wav")},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["error"] == "Transcription failed"
+
+
+def test_llm_provider_switches_to_ollama_without_api_key(monkeypatch):
+    monkeypatch.setattr(support_chat, "LLM_PROVIDER", "ollama")
+    model = support_chat._build_model()
+    assert type(model).__name__ == "ChatOllama"
+    assert model.base_url == support_chat.OLLAMA_BASE_URL
+    assert model.model == support_chat.OLLAMA_MODEL
+
+
+def test_llm_provider_unknown_value_raises_clear_error(monkeypatch):
+    monkeypatch.setattr(support_chat, "LLM_PROVIDER", "something-else")
+    try:
+        support_chat._build_model()
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "something-else" in str(e)
+
+
 def test_extract_text_handles_stringified_content_blocks():
     # Observed live: langchain-google-genai sometimes returns AIMessage.content
     # as a real list of typed blocks, and sometimes (inconsistently) as an
@@ -863,3 +1032,266 @@ def test_support_chat_history_persists_per_user_not_per_session(client):
     assert history[0].type == "human"
     assert history[1].content == "You have no payment method on file yet."
     assert history[1].type == "ai"
+
+
+# --- BPAY rail: parsing, CRN validation, and the full command -> confirm -> execute flow ---
+
+def test_bpay_crn_mod10_validation():
+    from bpay_repo import validate_crn_mod10
+    assert validate_crn_mod10("79927398713") is True
+    assert validate_crn_mod10("79927398710") is False
+    assert validate_crn_mod10("5") is False
+    assert validate_crn_mod10("") is False
+
+
+def test_bpay_parser_extracts_full_command():
+    from bpay_parser import parse_bpay_command
+    result = parse_bpay_command("Pay Origin BPAY 110 dollars, biller code 111999, reference 79927398713")
+    assert result.ok is True
+    assert result.biller_name == "Origin"
+    assert result.biller_code == "111999"
+    assert result.crn == "79927398713"
+    assert result.amount == 110.0
+    assert result.missing == []
+
+
+def test_bpay_parser_flags_missing_slots():
+    from bpay_parser import parse_bpay_command
+    result = parse_bpay_command("Pay my electricity bill with BPAY")
+    assert result.ok is True
+    assert "crn" in result.missing
+    assert "amount" in result.missing
+
+
+def test_bpay_command_with_invalid_crn_is_clarify(client):
+    session_id = _new_session(client)
+    r = client.post(
+        "/bpay/command",
+        json={"session_id": session_id, "text": "Pay Origin BPAY 30 dollars, biller code 111999, reference 123"},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert body["decision"]["decision"] == "CLARIFY"
+    assert "crn" in body["missing"]
+
+
+def test_bpay_command_with_unknown_biller_is_clarify(client):
+    session_id = _new_session(client)
+    r = client.post(
+        "/bpay/command",
+        json={"session_id": session_id, "text": "Pay 30 BPAY biller code 000000 reference 79927398713"},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "biller_code" in body["missing"]
+
+
+def test_bpay_full_flow_command_confirm_execute(client):
+    session_id = _new_session(client)
+    r = client.post(
+        "/bpay/command",
+        json={"session_id": session_id, "text": "Pay Origin BPAY 30 dollars, biller code 111999, reference 79927398713"},
+    )
+    body = r.json()
+    assert body["ok"] is True
+    assert body["biller"]["biller_name"] == "Origin Energy"
+    assert body["decision"]["required_confirmation"] == "normal"
+    txn_id = body["txn_id"]
+    confirmation_id = body["confirmation"]["confirmation_id"]
+
+    r2 = client.post(
+        "/confirm/normal",
+        json={"session_id": session_id, "confirmation_id": confirmation_id, "phrase": "CONFIRM"},
+    )
+    assert r2.json()["ok"] is True
+
+    r3 = client.post("/bpay/execute", json={"session_id": session_id, "txn_id": txn_id})
+    body3 = r3.json()
+    assert body3["ok"] is True
+    assert body3["final_status"] == "succeeded"
+    assert body3["simulated_reference"].startswith("BPAY-SIM-")
+
+    from transactions_repo import get_transaction
+    txn = get_transaction(txn_id)
+    assert txn["rail"] == "bpay"
+    assert txn["status"] == "succeeded"
+    assert txn["bpay_biller_code"] == "111999"
+
+
+def test_bpay_amount_over_cap_requires_pin(client):
+    session_id = _new_session(client)
+    r = client.post(
+        "/bpay/command",
+        json={"session_id": session_id, "text": "Pay Origin BPAY 75 dollars, biller code 111999, reference 79927398713"},
+    )
+    body = r.json()
+    assert body["ok"] is True
+    assert body["decision"]["required_confirmation"] == "pin"
+
+
+def test_bpay_save_and_list_billers(client):
+    r = client.post(
+        "/bpay/billers/save",
+        json={"nickname": "My Electricity", "biller_code": "111999", "crn": "79927398713"},
+    )
+    assert r.json()["ok"] is True
+
+    billers = client.get("/bpay/billers").json()["billers"]
+    assert len(billers) == 1
+    assert billers[0]["nickname"] == "My Electricity"
+
+
+def test_bpay_save_biller_rejects_invalid_crn(client):
+    r = client.post(
+        "/bpay/billers/save",
+        json={"nickname": "Bad CRN", "biller_code": "111999", "crn": "123"},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "CRN" in body["error"]
+
+
+# --- Passkeys (WebAuthn/FIDO2): an additional step-up method alongside PIN ---
+# Real browser cryptography can't run headlessly, so these mock webauthn's
+# verify_* calls directly -- exercising this app's own wiring (challenge
+# binding per confirmation, sign-count tracking, replay/clone detection)
+# rather than the webauthn library itself.
+
+def _mock_verified_registration(monkeypatch, credential_id=b"cred-1", public_key=b"pubkey-bytes", sign_count=0):
+    from webauthn.registration.verify_registration_response import VerifiedRegistration
+    from webauthn.helpers.structs import AttestationFormat, PublicKeyCredentialType, CredentialDeviceType
+
+    fake = VerifiedRegistration(
+        credential_id=credential_id, credential_public_key=public_key, sign_count=sign_count,
+        aaguid="", fmt=AttestationFormat.NONE, credential_type=PublicKeyCredentialType.PUBLIC_KEY,
+        user_verified=True, attestation_object=b"", credential_device_type=CredentialDeviceType.SINGLE_DEVICE,
+        credential_backed_up=False,
+    )
+    import passkey_service
+    monkeypatch.setattr(passkey_service.webauthn, "verify_registration_response", lambda **kwargs: fake)
+
+
+def _mock_verified_authentication(monkeypatch, new_sign_count=1):
+    from webauthn.authentication.verify_authentication_response import VerifiedAuthentication
+    from webauthn.helpers.structs import CredentialDeviceType
+
+    fake = VerifiedAuthentication(
+        credential_id=b"cred-1", new_sign_count=new_sign_count,
+        credential_device_type=CredentialDeviceType.SINGLE_DEVICE, credential_backed_up=False, user_verified=True,
+    )
+    import passkey_service
+    monkeypatch.setattr(passkey_service.webauthn, "verify_authentication_response", lambda **kwargs: fake)
+
+
+def _register_fake_passkey(client, monkeypatch, credential_id=b"cred-1"):
+    import base64
+    _mock_verified_registration(monkeypatch, credential_id=credential_id)
+    begin = client.post("/webauthn/register/begin").json()
+    assert begin["ok"] is True
+    cred_id_b64url = base64.urlsafe_b64encode(credential_id).decode().rstrip("=")
+    finish = client.post(
+        "/webauthn/register/finish",
+        json={"credential": {"id": cred_id_b64url, "response": {}}},
+    )
+    body = finish.json()
+    assert body["ok"] is True
+    return body["credential_id"]
+
+
+def test_webauthn_register_begin_returns_valid_options(client):
+    r = client.post("/webauthn/register/begin")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["options"]["rp"]["id"] == "localhost"
+    assert "challenge" in body["options"]
+
+
+def test_webauthn_register_finish_without_begin_fails(client):
+    import passkey_service
+    from users_repo import DEMO_USER_ID
+    passkey_service._pending_registration_challenges.pop(DEMO_USER_ID, None)  # avoid leakage from other tests
+
+    r = client.post("/webauthn/register/finish", json={"credential": {"id": "x", "response": {}}})
+    body = r.json()
+    assert body["ok"] is False
+    assert "begin_registration" in body["error"]
+
+
+def test_webauthn_register_and_list_credentials(client, monkeypatch):
+    cred_id = _register_fake_passkey(client, monkeypatch)
+    creds = client.get("/webauthn/credentials").json()["credentials"]
+    assert len(creds) == 1
+    assert creds[0]["credential_id"] == cred_id
+
+
+def test_confirm_passkey_full_flow_approves_high_value_payment(client, monkeypatch):
+    cred_id = _register_fake_passkey(client, monkeypatch)
+    _mock_connect_flow(monkeypatch)
+
+    session_id = _new_session(client)
+    _add_contact(client, "Priya")
+    _add_default_payment_method(client)
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 75 to Priya"})
+    body = r.json()
+    assert body["decision"]["required_confirmation"] == "pin"  # over the 50 AUD cap
+    confirmation_id = body["confirmation"]["confirmation_id"]
+    txn_id = body["txn_id"]
+
+    begin = client.post("/webauthn/authenticate/begin", json={"confirmation_id": confirmation_id})
+    assert begin.json()["ok"] is True
+
+    _mock_verified_authentication(monkeypatch, new_sign_count=1)
+    r2 = client.post(
+        "/confirm/passkey",
+        json={"session_id": session_id, "confirmation_id": confirmation_id, "credential": {"id": cred_id}},
+    )
+    body2 = r2.json()
+    assert body2["ok"] is True
+    assert body2["status"] == "confirmed"
+
+    from transactions_repo import get_transaction
+    assert get_transaction(txn_id)["status"] == "confirmed"
+
+
+def test_confirm_passkey_without_begin_is_rejected(client, monkeypatch):
+    cred_id = _register_fake_passkey(client, monkeypatch)
+    session_id = _new_session(client)
+    from confirmations_repo import create_confirmation
+    from transactions_repo import create_pending_transaction
+    txn_id = create_pending_transaction(session_id=session_id, user_id="demo-user", amount_cents=7500, currency="AUD", payee_id=None)
+    conf = create_confirmation(txn_id=txn_id, user_id="demo-user", required_confirmation="pin")
+
+    r = client.post(
+        "/confirm/passkey",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"], "credential": {"id": cred_id}},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "challenge" in body["error"]
+
+
+def test_confirm_passkey_rejects_stale_sign_count_as_cloned(client, monkeypatch):
+    cred_id = _register_fake_passkey(client, monkeypatch)
+    session_id = _new_session(client)
+    from confirmations_repo import create_confirmation
+    from transactions_repo import create_pending_transaction
+    txn_id = create_pending_transaction(session_id=session_id, user_id="demo-user", amount_cents=7500, currency="AUD", payee_id=None)
+    conf = create_confirmation(txn_id=txn_id, user_id="demo-user", required_confirmation="pin")
+    client.post("/webauthn/authenticate/begin", json={"confirmation_id": conf["confirmation_id"]})
+
+    # Bump the stored sign count up first, to simulate a device that has
+    # already authenticated once...
+    import passkey_repo
+    passkey_repo.update_sign_count(cred_id, 5)
+
+    # ...then an assertion claiming a sign count that didn't increase beyond
+    # that should be rejected as a possible cloned authenticator.
+    _mock_verified_authentication(monkeypatch, new_sign_count=5)
+    r = client.post(
+        "/confirm/passkey",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"], "credential": {"id": cred_id}},
+    )
+    body = r.json()
+    assert body["ok"] is False
+    assert "cloned" in body["error"]

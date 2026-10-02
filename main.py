@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import stripe
@@ -15,7 +16,7 @@ from stripe_service import (
 
 from pathlib import Path as _Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Form, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -41,11 +42,26 @@ from payid_directory_repo import looks_like_payid, lookup_payid, seed_payid_dire
 
 from transactions_repo import (
     create_pending_transaction,
+    create_pending_bpay_transaction,
     update_transaction_status,
     get_transaction,
     set_receiver_evidence,
 )
-from confirmations_repo import create_confirmation, get_confirmation, is_confirmation_expired
+from bpay_parser import parse_bpay_command, is_bpay_command
+from bpay_repo import (
+    seed_bpay_directory,
+    lookup_biller,
+    find_biller_by_name,
+    find_saved_biller_by_nickname,
+    save_biller,
+    list_saved_billers,
+    get_saved_biller,
+    validate_crn_mod10,
+)
+from recurring_repo import create_schedule, list_schedules, set_schedule_status, due_schedules, advance_schedule
+from confirmations_repo import create_confirmation, get_confirmation, is_confirmation_expired, set_confirmation_challenge
+from passkey_repo import list_credentials as list_passkey_credentials
+from passkey_service import begin_registration, finish_registration, begin_authentication, finish_authentication
 from security import verify_pin
 
 app = FastAPI(title="VocalPay")
@@ -64,6 +80,7 @@ def on_startup():
     init_db()
     ensure_demo_user()
     seed_payid_directory()
+    seed_bpay_directory()
     load_dotenv()
     init_stripe()
 
@@ -914,6 +931,372 @@ def pay_execute(req: ExecutePaymentRequest):
         "final_status": status,
         "receiver_evidence": receiver_evidence,
     }
+
+
+@app.post("/voice/transcribe")
+async def voice_transcribe(session_id: str = Form(...), audio: UploadFile = File(...)):
+    """
+    Local speech-to-text via faster-whisper (CPU, int8) -- an alternative to
+    the browser's built-in SpeechRecognition that needs no cloud API and
+    works the same locally or in production. Heavier than the browser API
+    (loads a real model into memory on first call, with a one-time weight
+    download), so it's additive: the frontend's mic button still works via
+    the browser API where available, and can fall back to this endpoint.
+    """
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        return {"ok": False, "error": "No audio received"}
+
+    append_event(session_id, "VOICE_TRANSCRIBE_START", {"filename": audio.filename, "bytes": len(audio_bytes)})
+    try:
+        from voice_service import transcribe_audio_bytes
+        suffix = os.path.splitext(audio.filename or "")[1] or ".wav"
+        text = transcribe_audio_bytes(audio_bytes, suffix=suffix)
+    except Exception as e:
+        append_event(session_id, "VOICE_TRANSCRIBE_FAILED", {"error": str(e)})
+        return {"ok": False, "error": "Transcription failed", "details": str(e)}
+
+    append_event(session_id, "VOICE_TRANSCRIBE_SUCCESS", {"text": text})
+    return {"ok": True, "text": text}
+
+
+@app.post("/webauthn/register/begin")
+def webauthn_register_begin():
+    """Step 1 of registering a passkey: returns the options object for the
+    browser's navigator.credentials.create() call."""
+    options_json = begin_registration(DEMO_USER_ID, "Demo User")
+    return {"ok": True, "options": json.loads(options_json)}
+
+
+class WebauthnRegisterFinishRequest(BaseModel):
+    credential: dict
+    label: str | None = None
+
+
+@app.post("/webauthn/register/finish")
+def webauthn_register_finish(req: WebauthnRegisterFinishRequest):
+    """Step 2: verifies the browser's navigator.credentials.create() result
+    and saves the new passkey credential."""
+    return finish_registration(DEMO_USER_ID, req.credential, req.label)
+
+
+@app.get("/webauthn/credentials")
+def webauthn_list_credentials():
+    return {"credentials": list_passkey_credentials(DEMO_USER_ID)}
+
+
+class WebauthnAuthBeginRequest(BaseModel):
+    confirmation_id: str
+
+
+@app.post("/webauthn/authenticate/begin")
+def webauthn_authenticate_begin(req: WebauthnAuthBeginRequest):
+    """Step 1 of satisfying a pending confirmation with a passkey instead of
+    a PIN: returns the options object for navigator.credentials.get(), and
+    binds the issued challenge to this specific confirmation_id so
+    /confirm/passkey can detect a mismatched/replayed assertion."""
+    conf = get_confirmation(req.confirmation_id)
+    if not conf:
+        return {"ok": False, "error": "Confirmation not found"}
+    try:
+        options_json, challenge_b64url = begin_authentication(DEMO_USER_ID)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    set_confirmation_challenge(req.confirmation_id, challenge_b64url)
+    return {"ok": True, "options": json.loads(options_json)}
+
+
+class ConfirmPasskeyRequest(BaseModel):
+    session_id: str
+    confirmation_id: str
+    credential: dict
+
+
+@app.post("/confirm/passkey")
+def confirm_passkey(req: ConfirmPasskeyRequest):
+    """
+    An additional step-up confirmation method alongside PIN (never a
+    replacement -- /confirm/pin keeps working exactly as before). Accepted
+    on any confirmation that would otherwise accept a PIN, since a biometric
+    hardware-backed signature is at least as strong an assurance.
+    """
+    append_event(req.session_id, "CONFIRM_PASSKEY_ATTEMPT", {"confirmation_id": req.confirmation_id})
+
+    conf = get_confirmation(req.confirmation_id)
+    if not conf:
+        append_event(req.session_id, "CONFIRM_PASSKEY_FAILED", {"reason": "confirmation not found"})
+        return {"ok": False, "error": "Confirmation not found"}
+
+    if conf["status"] != "pending":
+        return {"ok": False, "error": f"Confirmation is {conf['status']}"}
+
+    if is_confirmation_expired(conf):
+        return _expire_confirmation(req.session_id, conf)
+
+    if conf["required_confirmation"] not in ("pin", "passkey"):
+        return {"ok": False, "error": f"This confirmation requires '{conf['required_confirmation']}', not a passkey"}
+
+    if not conf.get("challenge"):
+        append_event(req.session_id, "CONFIRM_PASSKEY_FAILED", {"reason": "no challenge issued"})
+        return {"ok": False, "error": "No passkey challenge issued yet -- call /webauthn/authenticate/begin first"}
+
+    result = finish_authentication(req.credential, conf["challenge"])
+    if not result["ok"]:
+        append_event(req.session_id, "CONFIRM_PASSKEY_FAILED", {"reason": result["error"]})
+        return {"ok": False, "error": result["error"]}
+
+    from confirmations_repo import set_confirmation_status
+    set_confirmation_status(req.confirmation_id, "approved")
+    update_transaction_status(conf["txn_id"], "confirmed")
+    append_event(req.session_id, "CONFIRM_APPROVED", {
+        "confirmation_id": req.confirmation_id, "txn_id": conf["txn_id"], "method": "passkey",
+    })
+    return {"ok": True, "txn_id": conf["txn_id"], "status": "confirmed"}
+
+
+def _bpay_confirmation_requirement(amount_cents: int) -> str:
+    # Same $50 AUD step-up cap as the PayID rail (policy.py DEFAULT_HARD_CAP_AUD),
+    # applied directly since BPAY has no "known payee" concept to key off.
+    return "pin" if amount_cents > 5000 else "normal"
+
+
+class BpayCommandRequest(BaseModel):
+    session_id: str
+    text: str
+
+
+@app.post("/bpay/command")
+def bpay_command(req: BpayCommandRequest):
+    """
+    Parses a BPAY payment command and either returns a slot-filling response
+    (missing/invalid fields, for the frontend to render an inline editable
+    card) or creates a pending transaction + confirmation, exactly like the
+    PayID rail's /command/text. BPAY has no Stripe test-mode equivalent, so
+    settlement (/bpay/execute) is simulated and clearly logged as such —
+    never represented as a real BPAY network payment.
+    """
+    append_event(req.session_id, "BPAY_COMMAND_RECEIVED", {"text": req.text})
+    parsed = parse_bpay_command(req.text)
+    if not parsed.ok:
+        return {"ok": False, "error": "Not a BPAY command"}
+
+    biller = None
+    if parsed.biller_code:
+        biller = lookup_biller(parsed.biller_code)
+    elif parsed.biller_name:
+        biller = find_saved_biller_by_nickname(DEMO_USER_ID, parsed.biller_name) or find_biller_by_name(parsed.biller_name)
+
+    missing = {m for m in parsed.missing if m != "biller"} if biller else set(parsed.missing)
+    if not biller:
+        missing.add("biller_code")
+    if parsed.crn and not validate_crn_mod10(parsed.crn):
+        missing.add("crn")  # present but fails the check-digit -- still needs a valid one
+
+    parsed_summary = {
+        "biller_name": parsed.biller_name,
+        "biller_code": biller["biller_code"] if biller else parsed.biller_code,
+        "biller_display_name": biller["biller_name"] if biller else None,
+        "crn": parsed.crn,
+        "amount": parsed.amount,
+    }
+
+    if missing:
+        reason = f"Missing or invalid: {', '.join(sorted(missing))}."
+        append_event(req.session_id, "BPAY_SLOTS_MISSING", {"missing": sorted(missing), "parsed": parsed_summary})
+        return {
+            "ok": False,
+            "decision": {"decision": "CLARIFY", "reason": reason, "required_confirmation": "none", "risk_level": "low"},
+            "missing": sorted(missing),
+            "parsed": parsed_summary,
+        }
+
+    amount_cents = int(round(parsed.amount * 100))
+    if amount_cents <= 0:
+        return {"ok": False, "error": "Amount must be > 0"}
+    if not (biller["min_amount_cents"] <= amount_cents <= biller["max_amount_cents"]):
+        return {"ok": False, "error": f"Amount is outside {biller['biller_name']}'s allowed range for this biller."}
+
+    required_confirmation = _bpay_confirmation_requirement(amount_cents)
+    txn_id = create_pending_bpay_transaction(
+        session_id=req.session_id,
+        user_id=DEMO_USER_ID,
+        amount_cents=amount_cents,
+        currency="AUD",
+        biller_code=biller["biller_code"],
+        crn=parsed.crn,
+    )
+    append_event(req.session_id, "TXN_CREATED", {"txn_id": txn_id, "amount_cents": amount_cents, "currency": "AUD", "rail": "bpay"})
+
+    conf = create_confirmation(txn_id=txn_id, user_id=DEMO_USER_ID, required_confirmation=required_confirmation)
+    append_event(req.session_id, "CONFIRMATION_CREATED", conf)
+
+    read_back = (
+        f"Confirm: Pay AUD {parsed.amount:.2f} to {biller['biller_name']} (biller code {biller['biller_code']}, "
+        f"CRN {parsed.crn}). Required: {required_confirmation.upper()}"
+    )
+    return {
+        "ok": True,
+        "biller": biller,
+        "parsed": parsed_summary,
+        "decision": {"decision": "PROCEED" if required_confirmation == "normal" else "STEP_UP",
+                     "reason": "BPAY slots resolved", "required_confirmation": required_confirmation, "risk_level": "low"},
+        "txn_id": txn_id,
+        "confirmation": conf,
+        "read_back": read_back,
+    }
+
+
+@app.get("/bpay/directory")
+def bpay_directory():
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM bpay_directory ORDER BY biller_name").fetchall()
+        return {"billers": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+class SaveBpayBillerRequest(BaseModel):
+    nickname: str
+    biller_code: str
+    crn: str
+
+
+@app.post("/bpay/billers/save")
+def bpay_save_biller(req: SaveBpayBillerRequest):
+    if not lookup_biller(req.biller_code):
+        return {"ok": False, "error": "Unknown biller code"}
+    if not validate_crn_mod10(req.crn):
+        return {"ok": False, "error": "CRN fails the check-digit validation"}
+    biller_id = save_biller(DEMO_USER_ID, req.nickname, req.biller_code, req.crn)
+    return {"ok": True, "biller_id": biller_id}
+
+
+@app.get("/bpay/billers")
+def bpay_list_saved_billers():
+    return {"billers": list_saved_billers(DEMO_USER_ID)}
+
+
+class ExecuteBpayRequest(BaseModel):
+    session_id: str
+    txn_id: str
+
+
+@app.post("/bpay/execute")
+def bpay_execute(req: ExecuteBpayRequest):
+    """
+    Settles a confirmed BPAY transaction. Simulated, not a real BPAY network
+    call (no test-mode BPAY network exists to call) -- clearly logged as
+    such in the audit trail rather than presented as a genuine settlement.
+    """
+    txn = get_transaction(req.txn_id)
+    if not txn:
+        return {"ok": False, "error": "Transaction not found"}
+    if txn["status"] != "confirmed":
+        append_event(req.session_id, "PAY_EXECUTE_BLOCKED", {"reason": "txn not confirmed", "status": txn["status"], "txn_id": req.txn_id})
+        return {"ok": False, "error": f"Transaction status must be confirmed (found {txn['status']})"}
+
+    simulated_reference = f"BPAY-SIM-{uuid4().hex[:12].upper()}"
+    update_transaction_status(req.txn_id, "succeeded")
+    append_event(req.session_id, "BPAY_SETTLEMENT_SIMULATED", {
+        "txn_id": req.txn_id,
+        "biller_code": txn.get("bpay_biller_code"),
+        "crn": txn.get("bpay_crn"),
+        "amount_cents": txn["amount_cents"],
+        "simulated_reference": simulated_reference,
+    })
+    return {
+        "ok": True,
+        "txn_id": req.txn_id,
+        "final_status": "succeeded",
+        "simulated_reference": simulated_reference,
+        "note": "BPAY settlement is simulated in this demo -- no real BPAY network exists in Stripe test mode.",
+    }
+
+
+class CreateScheduleRequest(BaseModel):
+    payment_rail: str      # "payid" | "bpay"
+    target_identifier: str  # a payee_id (payid rail) or saved biller_id (bpay rail)
+    amount_cents: int
+    cadence: str            # "weekly" | "fortnightly" | "monthly"
+
+
+@app.post("/recurring/schedules")
+def recurring_create_schedule(req: CreateScheduleRequest):
+    if req.payment_rail == "payid" and not get_payee(req.target_identifier):
+        return {"ok": False, "error": "Unknown payee_id"}
+    if req.payment_rail == "bpay" and not get_saved_biller(req.target_identifier):
+        return {"ok": False, "error": "Unknown saved biller_id -- save it via /bpay/billers/save first"}
+    try:
+        schedule_id = create_schedule(DEMO_USER_ID, req.payment_rail, req.target_identifier, req.amount_cents, req.cadence)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "schedule_id": schedule_id}
+
+
+@app.get("/recurring/schedules")
+def recurring_list_schedules():
+    return {"schedules": list_schedules(DEMO_USER_ID)}
+
+
+class ScheduleStatusRequest(BaseModel):
+    status: str  # "active" | "paused" | "cancelled"
+
+
+@app.post("/recurring/schedules/{schedule_id}/status")
+def recurring_set_status(schedule_id: str, req: ScheduleStatusRequest):
+    try:
+        set_schedule_status(schedule_id, req.status)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+class ProcessDueRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/recurring/process_due")
+def recurring_process_due(req: ProcessDueRequest):
+    """
+    Executes every active schedule whose next_run_at has passed. Standing
+    authorization was already granted when the schedule was created, so
+    this skips the interactive CONFIRM/PIN step and settles directly --
+    there's no cron daemon built into this app; call this endpoint on a
+    timer (e.g. an external scheduled job) to actually drive recurring
+    payments, or trigger it manually for a demo.
+    """
+    processed = []
+    for sched in due_schedules():
+        append_event(req.session_id, "RECURRING_PAYMENT_TRIGGERED", {
+            "schedule_id": sched["schedule_id"], "rail": sched["payment_rail"], "amount_cents": sched["amount_cents"],
+        })
+        try:
+            if sched["payment_rail"] == "payid":
+                txn_id = create_pending_transaction(
+                    session_id=req.session_id, user_id=DEMO_USER_ID,
+                    amount_cents=sched["amount_cents"], currency="AUD", payee_id=sched["target_identifier"],
+                )
+                update_transaction_status(txn_id, "confirmed")
+                result = pay_execute(ExecutePaymentRequest(session_id=req.session_id, txn_id=txn_id))
+            else:
+                biller = get_saved_biller(sched["target_identifier"])
+                txn_id = create_pending_bpay_transaction(
+                    session_id=req.session_id, user_id=DEMO_USER_ID,
+                    amount_cents=sched["amount_cents"], currency="AUD",
+                    biller_code=biller["biller_code"], crn=biller["crn"],
+                )
+                update_transaction_status(txn_id, "confirmed")
+                result = bpay_execute(ExecuteBpayRequest(session_id=req.session_id, txn_id=txn_id))
+        except Exception as e:
+            append_event(req.session_id, "RECURRING_PAYMENT_FAILED", {"schedule_id": sched["schedule_id"], "error": str(e)})
+            processed.append({"schedule_id": sched["schedule_id"], "ok": False, "error": str(e)})
+            continue
+
+        advance_schedule(sched["schedule_id"], sched["cadence"])
+        processed.append({"schedule_id": sched["schedule_id"], "txn_id": txn_id, "ok": result.get("ok", False)})
+
+    return {"ok": True, "processed": processed}
 
 
 # Serve the frontend from this same FastAPI process/origin — one deployed

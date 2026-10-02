@@ -41,15 +41,21 @@ Defined in [db/schema.sql](db/schema.sql), applied on startup via `init_db()` in
 | `audit_events` | Append-only, hash-chained event log | `event_id`, `session_id`, `ts`, `event_type`, `payload_json`, `prev_hash`, `event_hash` |
 | `payid_directory` | Mock external PayID registry (200 seeded rows) — see §4a | `phone_number` (PK, digits-only), `display_number`, `registered_name` |
 | `chat_messages` | Support chatbot conversation history, per-user — see §2c | `message_id`, `user_id`, `role` (`human`/`ai`), `content`, `created_at` |
+| `passkey_credentials` | FIDO2/WebAuthn passkeys — see §2e | `credential_id`, `user_id`, `public_key_cbor`, `sign_count`, `transports_json`, `label` |
+| `bpay_directory` | Mock BPAY biller directory (4 seeded rows) — see §8a | `biller_code` (PK), `biller_name`, `crn_rule`, `min/max_amount_cents` |
+| `saved_bpay_billers` | A user's saved billers | `biller_id`, `user_id`, `nickname`, `biller_code`, `crn` |
+| `recurring_schedules` | Scheduled/recurring payments — see §8b | `schedule_id`, `user_id`, `payment_rail`, `target_identifier`, `amount_cents`, `cadence`, `next_run_at`, `status` |
 
 `payees.is_contact` (new, default `1`): `1` = deliberately saved contact; `0` = auto-provisioned from a direct
 PayID payment, not yet saved — still fully payable and trackable, just hidden from the Setup contacts list
 until saved (§4a).
 
 `phone_number`/`stripe_connected_account_id` (on `payees`) and `stripe_transfer_id`/`destination_account_id`/
-`receiver_confirmed_at` (on `transactions`) were added for the receiver-evidence feature (§6a). [db.py](db.py)
-runs a small idempotent migration (`_run_migrations`) on every startup that `ALTER TABLE ADD COLUMN`s these
-into an already-existing `vocalpay.db` — safe to run repeatedly, only adds what's missing.
+`receiver_confirmed_at` (on `transactions`) were added for the receiver-evidence feature (§6a). `transactions`
+also has `rail` (`"payid"` default, or `"bpay"`), `bpay_biller_code`, `bpay_crn` (§8a); `confirmations` has
+`challenge` (§2e, WebAuthn). [db.py](db.py) runs a small idempotent migration (`_run_migrations`) on every
+startup that `ALTER TABLE ADD COLUMN`s these into an already-existing `vocalpay.db` — safe to run repeatedly,
+only adds what's missing.
 
 Indexes on `payees(user_id, nickname)`, `audit_events(session_id, ts)`, `transactions(user_id, created_at)`,
 `confirmations(txn_id)`.
@@ -136,7 +142,7 @@ parser error. This is a deliberate split, not a convenience shortcut:
   conversations even after closing the tab or a Render cold start (once Turso persistence, §2b, is wired up).
   `_load_history()`/`_save_message()` load the last 20 turns as LangChain `HumanMessage`/`AIMessage` objects
   and append the new exchange after each reply.
-- **Model**: Google Gemini (`gemini-2.5-flash` by default, overridable via `GEMINI_MODEL`) via
+- **Model**: Google Gemini (`gemini-3.6-flash` by default, overridable via `GEMINI_MODEL`) via
   `langchain-google-genai`, orchestrated with `langchain.agents.create_agent()` (LangChain 1.x's tool-calling
   agent loop). Requires a `GEMINI_API_KEY` env var (from https://aistudio.google.com/apikey) — the agent, and
   the Gemini client inside it, are constructed lazily on first use, and a missing key surfaces as a clear
@@ -144,6 +150,74 @@ parser error. This is a deliberate split, not a convenience shortcut:
 - Every turn is also audit-logged (`SUPPORT_CHAT_MESSAGE`/`SUPPORT_CHAT_REPLY`/`SUPPORT_CHAT_FAILED`), same as
   every other action in the app.
 - `render.yaml` declares `GEMINI_API_KEY` as a `sync: false` env var alongside the others.
+- **Content-extraction quirk (fixed)**: `langchain-google-genai` sometimes returns a reply's content as a real
+  list of typed blocks, and sometimes as an already-stringified repr of that same list (observed live,
+  inconsistent between calls on the same model). `_extract_text()` in `support_chat.py` detects and parses
+  the stringified form too (`ast.literal_eval`) before pulling out just the text — otherwise raw internal
+  signature/metadata leaked into replies and into persisted chat history.
+
+## 2d. Swappable LLM backend — Gemini or self-hosted Ollama — new
+
+`support_chat.py`'s `_build_model()` picks the backend from `LLM_PROVIDER` (`"gemini"`, the default, or
+`"ollama"`) without touching the tools, system prompt, or memory layer above — only which model answers
+changes. `LLM_PROVIDER=ollama` uses `langchain-ollama`'s `ChatOllama` against `OLLAMA_BASE_URL` (default
+`http://localhost:11434`) and `OLLAMA_MODEL` (default `qwen2.5:7b-instruct`, matching the blueprint's choice of
+model) — no API key needed, just a reachable server. **This needs real compute VocalPay's free Render
+instance doesn't have**: either run Ollama on your own machine/GPU box and point `OLLAMA_BASE_URL` at it (not
+reachable from Render unless that box has a public address), or don't use this provider in that deployment.
+Verified: constructing the model with the provider switched doesn't require network access until first actual
+use, so an unreachable Ollama server fails clearly at call time, not at startup.
+
+## 2e. Passkeys (FIDO2/WebAuthn) — an additional step-up method alongside PIN — new
+
+Exactly as scoped: **PIN keeps working unchanged** (`/confirm/pin`, `/confirm/normal`) — passkeys
+(`/confirm/passkey`) are a second, optional way to satisfy the *same* step-up requirement, never a
+replacement.
+
+- `passkey_service.py` wraps the `webauthn` (py_webauthn) library: `begin_registration`/`finish_registration`
+  for enrolling a new passkey, `begin_authentication`/`finish_authentication` for satisfying a confirmation.
+  `passkey_credentials` (new table) stores each credential's public key (COSE/CBOR) and sign count.
+- **Challenge binding**: each PIN-equivalent confirmation's WebAuthn challenge is stored on that specific
+  `confirmations` row (`challenge` column, new) via `set_confirmation_challenge()` — an assertion is checked
+  against the challenge issued for *that* confirmation, not just any valid signature, which is what stops a
+  replayed assertion from satisfying a different payment.
+- **Cloned-authenticator detection**: a legitimate authenticator's sign count only ever increases. A new
+  assertion whose count didn't grow past what's stored (when the stored count was already nonzero) is rejected
+  outright as a possible cloned credential — verified with a dedicated test.
+- `/confirm/passkey` is accepted on any confirmation that would otherwise accept a PIN (`required_confirmation`
+  `"pin"` or `"passkey"`) — a biometric hardware-backed signature is at least as strong an assurance as a
+  4-digit PIN.
+- **Frontend**: Setup has a "Register a passkey" button (`navigator.credentials.create()`); the PIN
+  confirmation card has a "Use a passkey instead" link (`navigator.credentials.get()`) when the browser
+  supports `PublicKeyCredential`. Binary fields (challenge, credential ids) are converted between
+  base64url (what py_webauthn's `options_to_json()` emits) and `ArrayBuffer` (what the browser API needs) by
+  hand in `app.js` — no bundler/npm package in this project, so no `@simplewebauthn/browser`; same conversion,
+  written out.
+- `WEBAUTHN_RP_ID`/`WEBAUTHN_RP_NAME`/`WEBAUTHN_ORIGIN` env vars must match the serving domain exactly
+  (`localhost`/`http://localhost:8001` locally; `vocalpay.onrender.com`/`https://vocalpay.onrender.com` in
+  `render.yaml`) — a mismatch is the most common cause of WebAuthn failures.
+- **Known limitation**: pending *registration* challenges live in an in-memory dict keyed by user_id
+  (`passkey_service._pending_registration_challenges`), not the database — fine for this single-process demo,
+  but wouldn't survive a restart mid-registration or multiple server workers. Authentication challenges don't
+  have this problem (persisted on the `confirmations` row).
+
+## 2f. Local voice transcription (faster-whisper) — new, additive
+
+`POST /voice/transcribe` (`voice_service.py`) runs speech-to-text locally via `faster-whisper` (CPU, int8,
+`tiny.en` by default — `small.en` per the original blueprint spec needs a larger one-time download, set via
+`WHISPER_MODEL_SIZE`) instead of a cloud API. **Additive, not a replacement**: the frontend's mic button still
+uses the browser's built-in `SpeechRecognition` where available (zero backend load, works today); this
+endpoint is the alternative path for a fully local/open-source pipeline.
+
+Includes `normalize_spoken_numbers()` — Whisper transcribes a spoken phone number as digit *words* far more
+often than digits ("oh four one two three four five six seven eight" rather than "0412345678"); without
+converting runs of 3+ digit-words back to digits, a read-aloud PayID never matches the intent parser's PayID
+pattern. Verified against the blueprint's own example input.
+
+**Known limitation**: needs real CPU/RAM (and a one-time model-weight download) that Render's free tier
+doesn't reliably have — documented in `render.yaml`, not silently broken. Tested with the model mocked (no
+real inference in CI); the pipeline itself (temp file handling, normalization, error surfacing) is real code,
+not a stub.
 
 ## 3a. Duplicate contact names — same person vs. different person — new
 
@@ -461,6 +535,57 @@ Tailwind is pulled from a CDN `<script>` tag. Opens directly against the FastAPI
 - A pulsing "listening" ring and waveform-bar CSS keyframes are in place in
   [styles.css](frontend/styles.css) for a future streaming-audio upgrade.
 
+## 8a. BPAY rail — new (simulated settlement)
+
+A second payment rail alongside PayID, routed from the same chat input: the frontend sends any message
+containing "BPAY" to `POST /bpay/command` instead of `/command/text`. `bpay_parser.py` extracts a biller
+name/code, CRN, and amount from free text (e.g. `"Pay Origin BPAY 30 dollars, biller code 111999, reference
+79927398713"`); `bpay_repo.py` resolves the biller against a seeded demo directory (`bpay_directory`, 4
+billers) and validates the CRN's check digit with a real Luhn/Mod10 implementation (verified against known
+test vectors). Missing or invalid slots return a `CLARIFY`-shaped response with what's missing, the same
+pattern as the PayID flow's duplicate-name conflicts — for the frontend to prompt for what's still needed.
+
+A valid BPAY command reuses the *exact same* confirmation pipeline as PayID payments (`create_confirmation`,
+`/confirm/normal`, `/confirm/pin`, `/confirm/passkey` all work unchanged on a BPAY transaction) — only
+`POST /bpay/execute` differs, since there's no Stripe test-mode equivalent for a real BPAY network: settlement
+is **simulated** and clearly labeled as such (`note` field in the response, `BPAY_SETTLEMENT_SIMULATED` audit
+event with a fabricated `BPAY-SIM-...` reference) rather than presented as a genuine payment. Users can also
+save a biller as a favorite (`POST /bpay/billers/save`, Setup tab lists them) for the recurring-payments
+feature below.
+
+## 8b. Recurring/scheduled payments — new
+
+`recurring_repo.py` + `POST /recurring/schedules` let a user set up a weekly/fortnightly/monthly payment
+against either rail (a saved PayID contact or a saved BPAY biller). There's no cron daemon built into this
+app — `POST /recurring/process_due` is the trigger: it finds every active schedule whose `next_run_at` has
+passed, creates and **auto-confirms** the transaction (standing authorization was already granted when the
+schedule was created, so this skips the interactive CONFIRM/PIN step), executes it through the same
+`pay_execute`/`bpay_execute` functions the manual flows use, and advances `next_run_at` by one cadence period
+— called on demand for a demo, or wire an external scheduled job (e.g. a Render Cron Job, or any periodic
+HTTP caller) to hit it for real recurring behavior.
+
+## 8c. Blueprint coverage — what's done, what's deferred
+
+A large architectural blueprint was supplied covering a near-complete rewrite (open-source local LLM/speech,
+FIDO2 passkeys, a new payment rail, an explicit LangGraph state machine, and a conversational edge-case
+matrix). Implemented in full except where compute/safety tradeoffs made a deferral the right call — tracked
+here rather than silently dropped:
+
+| Blueprint item | Status |
+| --- | --- |
+| Self-hosted LLM (Qwen 2.5 via Ollama) | **Done** — `LLM_PROVIDER=ollama` (§2d); needs you to run/reach an Ollama server, not usable on the free Render plan as-is |
+| Local speech-to-text (faster-whisper) | **Done, additive** — `/voice/transcribe` (§2f); browser `SpeechRecognition` stays the default, lighter path |
+| FIDO2/WebAuthn passkeys | **Done, additional to PIN** — §2e, by explicit design choice (PIN was kept, not replaced) |
+| BPAY payment rail + CRN validation | **Done, simulated settlement** — §8a (no real BPAY test network exists) |
+| Recurring/scheduled payments | **Done, no built-in cron** — §8b (needs an external trigger to actually run unattended) |
+| Self-correction ("no 30", "wait make it 35") | **Done** — intent_parser.py now catches a correction stated either before or after the payee |
+| Spoken-number normalization ("oh four one two...") | **Done** — `voice_service.normalize_spoken_numbers()` |
+| Duplicate-contact-name picker qualified by PayID | **Done** — §3a (built in an earlier round of work) |
+| Invalid/negative amount rejection | **Done** — already enforced (Pydantic `gt=0` + policy `BLOCK`) |
+| Missing-slot clarification UI (BPAY) | **Done** — `/bpay/command`'s `missing` field, surfaced in the chat error bubble |
+| Explicit LangGraph `AgentState` (payment_draft, missing_slots, active_txn_id, dialogue_intent) | **Deferred** — `create_agent()` (§2c) already runs on a LangGraph `StateGraph` internally, but a hand-rolled state machine with these exact fields wasn't built. Reason: the one capability it would add — letting the *same* agent draft and hold a pending payment across turns — conflicts with the deliberate safety boundary (§2c) that the chatbot can never create a transaction. Building it without crossing that boundary would mean a state machine that tracks a draft but still can't act on it, which doesn't earn its complexity. |
+| Conversational interruption (pause a payment draft mid-flow, answer a question, resume) | **Deferred**, for the same reason — this app's payment flow and chatbot are intentionally two separate pipelines (§2c), so there's no single "draft" for an interruption to pause. What already works today: you can message the support chatbot in between a payment's confirmation and execute steps (they're independent HTTP calls) — just not a resumable draft held in one conversational state. |
+
 ## 9. Known gaps / demo shortcuts (not yet productionized)
 
 - Single hardcoded `demo-user` — no real auth, login, or multi-user support (frontend has no login screen
@@ -508,25 +633,33 @@ security.py              PIN hashing/verification (PBKDF2)
 audit.py                 Hash-chained append-only audit log
 db.py                    DB connection (SQLite locally, Turso/libSQL in prod — see §2b) + schema init + migrations
 db/schema.sql            Table definitions (payees + transactions include receiver-evidence columns)
-support_chat.py          LangChain + Gemini support chatbot: read-only tools, per-user DB-persisted memory — see §2c
+support_chat.py          LangChain support chatbot (Gemini or Ollama, §2d): read-only tools, per-user DB memory — see §2c
+passkey_service.py       WebAuthn registration/authentication via py_webauthn — see §2e
+passkey_repo.py          Passkey credential CRUD + sign-count tracking
+voice_service.py         Local speech-to-text (faster-whisper) + spoken-number normalization — see §2f
+bpay_parser.py           Free-text -> BPAY slots (biller/CRN/amount) parser — see §8a
+bpay_repo.py             BPAY directory lookup, CRN Mod10 validation, saved billers
+recurring_repo.py        Recurring/scheduled payment CRUD + due-schedule processing — see §8b
 users_repo.py            Demo user bootstrap
 payees_repo.py           Payee lookup/existence checks + get_payee() + find_payee_by_phone() + set_payee_connected_account()
 payid_directory_repo.py  200-entry mock external PayID registry: seed_payid_directory(), lookup_payid(), looks_like_payid()
 payment_methods_repo.py  Default payment method get/set
-transactions_repo.py     Transaction CRUD + set_receiver_evidence()
-confirmations_repo.py    Confirmation CRUD + expiry check
+transactions_repo.py     Transaction CRUD + set_receiver_evidence() + create_pending_bpay_transaction()
+confirmations_repo.py    Confirmation CRUD + expiry check + set_confirmation_challenge() (WebAuthn)
 stripe_service.py        Stripe init, PaymentIntent creation (idempotency + destination charges), test
                          payment method seeding, test Connect account creation, receiver balance lookup
 check_db.py              Dev script: list DB tables
 check_pm.py              Dev script: dump payment_methods
 create_stripe_pm.py      Dev script: seed a Stripe test card/customer
-requirements.txt         Pinned Python dependencies (now UTF-8; includes pytest/httpx/langchain/libsql-client)
+VocalPay_System_Blueprint.docx  The architectural blueprint document this round of work was built from
+requirements.txt         Pinned Python dependencies (langchain/langgraph/libsql-client/webauthn/faster-whisper/python-docx)
 vocalpay.db              Local SQLite database file (dev only — prod uses Turso, see §2b)
-.env                     STRIPE_SECRET_KEY / TURSO_* / GEMINI_API_KEY (local secrets, keep out of git)
+.env                     STRIPE_SECRET_KEY / TURSO_* / GEMINI_API_KEY / WEBAUTHN_* / etc. (local secrets, keep out of git)
 tests/conftest.py        Isolated-DB pytest fixture
-tests/test_vocalpay.py   45 integration tests (payments, contacts, PayID, duplicate-name resolution, support chat)
-frontend/index.html      Chat UI shell + Setup/Audit tabbed side panel (Tailwind CDN)
-frontend/app.js          All frontend logic: session, chat, confirm cards + PayID, pay execution + receiver
-                         evidence, audit panel, setup tab (contacts + balance checks), voice
+tests/test_vocalpay.py   73 integration tests (payments, contacts, PayID, support chat, BPAY, passkeys, recurring)
+frontend/index.html      Chat UI shell + Setup/Audit tabbed side panel (Tailwind CDN), now with Passkeys + BPAY billers
+frontend/app.js          All frontend logic: session, chat, confirm cards + PayID + BPAY, pay execution + receiver
+                         evidence, audit panel, setup tab (contacts, balance checks, passkeys, billers), voice,
+                         WebAuthn base64url<->ArrayBuffer helpers
 frontend/styles.css      Chat bubble/PIN-box/waveform/spinner styling
 ```

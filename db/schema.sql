@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   stripe_transfer_id TEXT,              -- the Transfer that moved funds to the payee's connected account
   destination_account_id TEXT,          -- payee's Stripe Connect account id, snapshotted at execute time
   receiver_confirmed_at TEXT,           -- set once we've verified the destination account actually has the funds
+  rail TEXT NOT NULL DEFAULT 'payid',   -- "payid" (card -> Stripe/Connect) | "bpay" (simulated settlement)
+  bpay_biller_code TEXT,
+  bpay_crn TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(user_id),
   FOREIGN KEY (payee_id) REFERENCES payees(payee_id)
@@ -74,9 +77,10 @@ CREATE TABLE IF NOT EXISTS confirmations (
   confirmation_id TEXT PRIMARY KEY,
   txn_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
-  required_confirmation TEXT NOT NULL,   -- "normal" or "pin"
+  required_confirmation TEXT NOT NULL,   -- "normal" | "pin" | "passkey"
   pin_attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 3,
+  challenge TEXT,                       -- WebAuthn challenge, only set when required_confirmation="passkey"
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   status TEXT NOT NULL,                 -- "pending" | "approved" | "rejected" | "expired"
@@ -109,3 +113,64 @@ CREATE TABLE IF NOT EXISTS payid_directory (
   display_number TEXT NOT NULL,    -- formatted for display, e.g. "0400 111 222"
   registered_name TEXT NOT NULL
 );
+
+-- FIDO2/WebAuthn passkey credentials — an additional step-up confirmation
+-- method alongside the PIN (never a replacement): registered via
+-- POST /webauthn/register, asserted via POST /confirm/passkey.
+CREATE TABLE IF NOT EXISTS passkey_credentials (
+  credential_id TEXT PRIMARY KEY,       -- base64url credential id from the authenticator
+  user_id TEXT NOT NULL,
+  public_key_cbor BLOB NOT NULL,        -- COSE public key, as returned by py_webauthn
+  sign_count INTEGER NOT NULL DEFAULT 0, -- cloned-authenticator detection: must only increase
+  transports_json TEXT,                 -- e.g. '["internal","hybrid"]'
+  label TEXT,                           -- user-facing name, e.g. "MacBook Touch ID"
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user ON passkey_credentials(user_id);
+
+-- Australian BPAY biller directory (demo/mock — BPAY has no Stripe test-mode
+-- equivalent, so this rail is simulated: validated and audited exactly like
+-- every other payment, but settlement is recorded, not sent over a real
+-- BPAY network). crn_rule names which check digit algorithm applies to that
+-- biller's Customer Reference Number — "MOD10" (Luhn-style) is the common one.
+CREATE TABLE IF NOT EXISTS bpay_directory (
+  biller_code TEXT PRIMARY KEY,
+  biller_name TEXT NOT NULL,
+  crn_rule TEXT NOT NULL DEFAULT 'MOD10',
+  min_amount_cents INTEGER NOT NULL DEFAULT 100,
+  max_amount_cents INTEGER NOT NULL DEFAULT 10000000
+);
+
+-- A user's saved billers (nickname -> biller code + their specific CRN, e.g.
+-- an account number), the BPAY equivalent of a saved PayID contact.
+CREATE TABLE IF NOT EXISTS saved_bpay_billers (
+  biller_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  nickname TEXT NOT NULL,
+  biller_code TEXT NOT NULL,
+  crn TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(user_id),
+  FOREIGN KEY (biller_code) REFERENCES bpay_directory(biller_code),
+  UNIQUE (user_id, nickname)
+);
+
+-- Recurring/scheduled payments. next_run_at is advanced by
+-- recurring_repo.process_due_schedules() — a function callable on demand or
+-- from an external cron trigger; this app has no built-in cron daemon.
+CREATE TABLE IF NOT EXISTS recurring_schedules (
+  schedule_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  payment_rail TEXT NOT NULL,        -- "payid" | "bpay"
+  target_identifier TEXT NOT NULL,   -- payee_id (payid rail) or biller_id (bpay rail)
+  amount_cents INTEGER NOT NULL,
+  cadence TEXT NOT NULL,             -- "weekly" | "fortnightly" | "monthly"
+  next_run_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active', -- "active" | "paused" | "cancelled"
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recurring_schedules_due ON recurring_schedules(status, next_run_at);

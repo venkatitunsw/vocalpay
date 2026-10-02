@@ -56,6 +56,18 @@ def increment_attempts(confirmation_id: str) -> int:
     finally:
         conn.close()
 
+def set_confirmation_challenge(confirmation_id: str, challenge_b64url: str) -> None:
+    """Binds a WebAuthn assertion challenge to a pending confirmation, so
+    /confirm/passkey can verify the signed response matches the challenge
+    that was actually issued for THIS confirmation (not replayed from another)."""
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE confirmations SET challenge=? WHERE confirmation_id=?", (challenge_b64url, confirmation_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def set_confirmation_status(confirmation_id: str, status: str) -> None:
     conn = get_conn()
     try:

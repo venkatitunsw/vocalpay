@@ -102,21 +102,24 @@ def parse_text_command(text: str) -> ParseResult:
         return ParseResult(False, error="Could not figure out who to pay. Try: 'Pay 12 to John'")
 
     # 2) Note: "for <text>" appearing after the resolved target.
+    after_target = raw[target_span[1]:]
     note = ""
-    note_m = NOTE_RE.search(raw[target_span[1]:])
+    note_m = NOTE_RE.search(after_target)
     if note_m:
         note = note_m.group("note").strip().rstrip(".")
 
-    # 3) Amount: numbers mentioned before the target trigger. When more than
-    # one appears, the LAST one wins — this is what makes a self-correction
-    # like "pay 20, no 30 to Smith" resolve to 30 without needing to detect
-    # correction words explicitly.
+    # 3) Amount: numbers mentioned before the target trigger, OR between the
+    # target and a trailing "for <note>" — covers both a correction stated
+    # up front ("pay 20, no 30 to Smith") and one stated AFTER the payee
+    # ("Pay 20 to Dave... wait make it 35 for the pizza"). The LAST such
+    # number wins, so a self-correction naturally overrides an earlier
+    # amount without the parser needing to recognize correction words
+    # specifically. Numbers inside the note itself ("for 2 drinks") are
+    # deliberately excluded from this scan — that's incidental text, not an
+    # amount correction.
     before_target = raw[: target_span[0]]
-    amounts = [float(a) for a in AMOUNT_RE.findall(before_target)]
-    if not amounts:
-        # Less common phrasing where the amount trails the target instead,
-        # e.g. "Pay to John 12 dollars" — fall back to scanning after it.
-        amounts = [float(a) for a in AMOUNT_RE.findall(raw[target_span[1]:])]
+    correction_region = after_target[: note_m.start()] if note_m else after_target
+    amounts = [float(a) for a in AMOUNT_RE.findall(before_target + " " + correction_region)]
     if not amounts:
         return ParseResult(False, error="Could not find an amount to pay. Try: 'Pay 12 to John'")
 

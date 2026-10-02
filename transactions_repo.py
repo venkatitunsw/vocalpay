@@ -28,6 +28,37 @@ def create_pending_transaction(
     finally:
         conn.close()
 
+
+def create_pending_bpay_transaction(
+    session_id: str,
+    user_id: str,
+    amount_cents: int,
+    currency: str,
+    biller_code: str,
+    crn: str,
+) -> str:
+    """Same lifecycle as create_pending_transaction (confirmation -> execute
+    -> succeeded/failed), but for the BPAY rail: no payee_id (there's no
+    saved-contact concept for a biller), biller_code/crn recorded instead."""
+    txn_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO transactions
+            (txn_id, session_id, user_id, amount_cents, currency, payee_id, status,
+             stripe_payment_intent_id, rail, bpay_biller_code, bpay_crn, created_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, 'bpay', ?, ?, ?)
+            """,
+            (txn_id, session_id, user_id, amount_cents, currency, "created", biller_code, crn, now),
+        )
+        conn.commit()
+        return txn_id
+    finally:
+        conn.close()
+
 def update_transaction_status(txn_id: str, status: str) -> None:
     conn = get_conn()
     try:

@@ -40,6 +40,10 @@ const pmFeedback = document.getElementById("pm-feedback");
 const micBtn = document.getElementById("mic-btn");
 const micPulse = document.getElementById("mic-pulse");
 const micStatus = document.getElementById("mic-status");
+const passkeyList = document.getElementById("passkey-list");
+const registerPasskeyBtn = document.getElementById("register-passkey-btn");
+const passkeyFeedback = document.getElementById("passkey-feedback");
+const bpayBillerList = document.getElementById("bpay-biller-list");
 
 // --- API helper -------------------------------------------------------------
 
@@ -119,6 +123,89 @@ function money(amount, currency) {
   return `${currency} ${Number(amount).toFixed(2)}`;
 }
 
+// --- WebAuthn/passkey helpers --------------------------------------------------
+// py_webauthn's options_to_json() encodes binary fields (challenge, user.id,
+// credential ids) as base64url strings, but navigator.credentials.create()/
+// get() need real ArrayBuffers for those same fields — and the reverse on
+// the way back. These convert between the two; there's no bundler here, so
+// no @simplewebauthn/browser — this is the same conversion it does.
+
+function base64urlToBuffer(base64url) {
+  const padding = "=".repeat((4 - (base64url.length % 4)) % 4);
+  const base64 = (base64url + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const buffer = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) buffer[i] = raw.charCodeAt(i);
+  return buffer;
+}
+
+function bufferToBase64url(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let str = "";
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function registerPasskey(label) {
+  const begin = await api("/webauthn/register/begin", { method: "POST" });
+  if (!begin.ok) throw new Error(begin.error || "Could not start passkey registration");
+
+  const opts = begin.options;
+  const publicKey = {
+    ...opts,
+    challenge: base64urlToBuffer(opts.challenge),
+    user: { ...opts.user, id: base64urlToBuffer(opts.user.id) },
+    excludeCredentials: (opts.excludeCredentials || []).map((c) => ({ ...c, id: base64urlToBuffer(c.id) })),
+  };
+
+  const credential = await navigator.credentials.create({ publicKey });
+  const credentialJson = {
+    id: credential.id,
+    rawId: bufferToBase64url(credential.rawId),
+    type: credential.type,
+    response: {
+      attestationObject: bufferToBase64url(credential.response.attestationObject),
+      clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+      transports: credential.response.getTransports ? credential.response.getTransports() : [],
+    },
+  };
+
+  return api("/webauthn/register/finish", { method: "POST", body: { credential: credentialJson, label } });
+}
+
+async function authenticateWithPasskey(confirmationId) {
+  const begin = await api("/webauthn/authenticate/begin", {
+    method: "POST",
+    body: { confirmation_id: confirmationId },
+  });
+  if (!begin.ok) throw new Error(begin.error || "Could not start passkey authentication");
+
+  const opts = begin.options;
+  const publicKey = {
+    ...opts,
+    challenge: base64urlToBuffer(opts.challenge),
+    allowCredentials: (opts.allowCredentials || []).map((c) => ({ ...c, id: base64urlToBuffer(c.id) })),
+  };
+
+  const credential = await navigator.credentials.get({ publicKey });
+  const credentialJson = {
+    id: credential.id,
+    rawId: bufferToBase64url(credential.rawId),
+    type: credential.type,
+    response: {
+      authenticatorData: bufferToBase64url(credential.response.authenticatorData),
+      clientDataJSON: bufferToBase64url(credential.response.clientDataJSON),
+      signature: bufferToBase64url(credential.response.signature),
+      userHandle: credential.response.userHandle ? bufferToBase64url(credential.response.userHandle) : null,
+    },
+  };
+
+  return api("/confirm/passkey", {
+    method: "POST",
+    body: { session_id: state.sessionId, confirmation_id: confirmationId, credential: credentialJson },
+  });
+}
+
 // --- Session lifecycle --------------------------------------------------------
 
 async function initSession() {
@@ -148,11 +235,19 @@ composer.addEventListener("submit", async (e) => {
   sendBtn.disabled = true;
 
   try {
-    const res = await api("/command/text", {
-      method: "POST",
-      body: { session_id: state.sessionId, text },
-    });
-    await handleCommandResponse(res, text);
+    if (/\bbpay\b/i.test(text)) {
+      const res = await api("/bpay/command", {
+        method: "POST",
+        body: { session_id: state.sessionId, text },
+      });
+      await handleBpayCommandResponse(res, text);
+    } else {
+      const res = await api("/command/text", {
+        method: "POST",
+        body: { session_id: state.sessionId, text },
+      });
+      await handleCommandResponse(res, text);
+    }
   } catch (err) {
     appendErrorBubble(`Request failed: ${err.message}`);
   } finally {
@@ -160,6 +255,33 @@ composer.addEventListener("submit", async (e) => {
     refreshAuditIfOpen();
   }
 });
+
+// --- BPAY command flow (routed above whenever the text mentions "BPAY") ---------
+
+async function handleBpayCommandResponse(res, originalText) {
+  if (!res.ok) {
+    if (res.decision && res.decision.decision === "CLARIFY") {
+      const p = res.parsed || {};
+      appendErrorBubble(
+        `${res.decision.reason} (so far: ${p.biller_display_name || p.biller_name || "biller?"}, ` +
+          `CRN ${p.crn || "?"}, amount ${p.amount != null ? p.amount : "?"})`
+      );
+    } else {
+      appendErrorBubble(res.error || "Could not understand that BPAY command.");
+    }
+    return;
+  }
+  appendAssistantBubble(res.read_back);
+  renderConfirmationCard(
+    {
+      intent: { amount: res.parsed.amount, currency: "AUD", payee_name: res.biller.biller_name, note: null },
+      txn_id: res.txn_id,
+      confirmation: res.confirmation,
+      payee: null,
+    },
+    { executeEndpoint: "/bpay/execute", rail: "bpay" }
+  );
+}
 
 async function handleCommandResponse(res, originalText) {
   if (!res.ok) {
@@ -202,10 +324,12 @@ async function askSupportChat(message) {
 
 // --- Confirmation card (normal phrase or PIN) -----------------------------------
 
-function renderConfirmationCard(cmdRes) {
+function renderConfirmationCard(cmdRes, opts = {}) {
   const card = appendCard();
   const { intent, txn_id, confirmation, payee } = cmdRes;
   const required = confirmation.required_confirmation;
+  const executeEndpoint = opts.executeEndpoint || "/pay/execute";
+  const rail = opts.rail || "payid";
 
   const header = `
     <div class="flex items-center justify-between">
@@ -234,10 +358,10 @@ function renderConfirmationCard(cmdRes) {
 
   if (required === "pin") {
     card.innerHTML = header + pinFormHtml();
-    wirePinForm(card, txn_id, confirmation.confirmation_id);
+    wirePinForm(card, txn_id, confirmation.confirmation_id, executeEndpoint);
   } else {
     card.innerHTML = header + normalFormHtml();
-    wireNormalForm(card, txn_id, confirmation.confirmation_id);
+    wireNormalForm(card, txn_id, confirmation.confirmation_id, executeEndpoint);
   }
 
   const saveBtn = card.querySelector(".save-contact-btn");
@@ -297,11 +421,14 @@ function pinFormHtml() {
         </button>
       </div>
     </form>
+    <button type="button" class="use-passkey-btn text-[11px] text-sky-400 hover:text-sky-300 underline underline-offset-2">
+      Use a passkey instead (fingerprint / face / Windows Hello)
+    </button>
     <p class="feedback text-xs h-4"></p>
   `;
 }
 
-function wireNormalForm(card, txnId, confirmationId) {
+function wireNormalForm(card, txnId, confirmationId, executeEndpoint) {
   const form = card.querySelector(".normal-form");
   const input = form.querySelector("input");
   const feedback = card.querySelector(".feedback");
@@ -317,7 +444,7 @@ function wireNormalForm(card, txnId, confirmationId) {
         method: "POST",
         body: { session_id: state.sessionId, confirmation_id: confirmationId, phrase },
       });
-      await handleConfirmResult(card, form, feedback, res, txnId);
+      await handleConfirmResult(card, form, feedback, res, txnId, executeEndpoint);
     } catch (err) {
       feedback.textContent = `Request failed: ${err.message}`;
       feedback.className = "feedback text-xs h-4 text-rose-400";
@@ -328,10 +455,11 @@ function wireNormalForm(card, txnId, confirmationId) {
   });
 }
 
-function wirePinForm(card, txnId, confirmationId) {
+function wirePinForm(card, txnId, confirmationId, executeEndpoint) {
   const form = card.querySelector(".pin-form");
   const boxes = [...form.querySelectorAll(".pin-box")];
   const feedback = card.querySelector(".feedback");
+  const passkeyBtn = card.querySelector(".use-passkey-btn");
   boxes[0].focus();
 
   boxes.forEach((box, i) => {
@@ -362,7 +490,7 @@ function wirePinForm(card, txnId, confirmationId) {
         boxes.forEach((b) => (b.value = ""));
         boxes[0].focus();
       }
-      await handleConfirmResult(card, form, feedback, res, txnId);
+      await handleConfirmResult(card, form, feedback, res, txnId, executeEndpoint);
     } catch (err) {
       feedback.textContent = `Request failed: ${err.message}`;
       feedback.className = "feedback text-xs h-4 text-rose-400";
@@ -371,13 +499,33 @@ function wirePinForm(card, txnId, confirmationId) {
       refreshAuditIfOpen();
     }
   });
+
+  if (passkeyBtn && window.PublicKeyCredential) {
+    passkeyBtn.addEventListener("click", async () => {
+      passkeyBtn.disabled = true;
+      feedback.textContent = "Waiting for your passkey (Touch ID / Face ID / Windows Hello)…";
+      feedback.className = "feedback text-xs h-4 text-slate-400";
+      try {
+        const res = await authenticateWithPasskey(confirmationId);
+        await handleConfirmResult(card, form, feedback, res, txnId, executeEndpoint);
+      } catch (err) {
+        feedback.textContent = `Passkey failed: ${err.message}`;
+        feedback.className = "feedback text-xs h-4 text-rose-400";
+      } finally {
+        passkeyBtn.disabled = false;
+      }
+    });
+  } else if (passkeyBtn) {
+    passkeyBtn.disabled = true;
+    passkeyBtn.title = "Passkeys aren't supported in this browser";
+  }
 }
 
 function setFormBusy(form, busy) {
   [...form.elements].forEach((el) => (el.disabled = busy));
 }
 
-async function handleConfirmResult(card, form, feedback, res, txnId) {
+async function handleConfirmResult(card, form, feedback, res, txnId, executeEndpoint) {
   if (!res.ok) {
     feedback.textContent = res.error || "Confirmation failed.";
     feedback.className = "feedback text-xs h-4 text-rose-400";
@@ -388,33 +536,42 @@ async function handleConfirmResult(card, form, feedback, res, txnId) {
   }
 
   feedback.textContent = "";
-  form.outerHTML = `<div class="text-emerald-400 text-xs font-medium flex items-center gap-1.5">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>
-    Confirmed
-  </div>`;
+  const confirmedNotice = document.createElement("div");
+  confirmedNotice.className = "text-emerald-400 text-xs font-medium flex items-center gap-1.5";
+  confirmedNotice.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>Confirmed`;
+  form.replaceWith(confirmedNotice);
+  card.querySelectorAll(".use-passkey-btn").forEach((el) => el.remove());
 
   const payBtn = document.createElement("button");
   payBtn.className = "w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold py-2.5 rounded-lg transition";
   payBtn.textContent = "Pay now";
-  payBtn.addEventListener("click", () => executePayment(card, payBtn, txnId));
+  payBtn.addEventListener("click", () => executePayment(card, payBtn, txnId, executeEndpoint));
   card.appendChild(payBtn);
 }
 
 // --- Payment execution -------------------------------------------------------
 
-async function executePayment(card, payBtn, txnId) {
+async function executePayment(card, payBtn, txnId, executeEndpoint) {
+  const endpoint = executeEndpoint || "/pay/execute";
   payBtn.disabled = true;
   payBtn.innerHTML = `<span class="inline-flex items-center gap-2 justify-center w-full">
-    <span class="spinner"></span> Authorizing through Stripe…
+    <span class="spinner"></span> ${endpoint === "/bpay/execute" ? "Settling via BPAY…" : "Authorizing through Stripe…"}
   </span>`;
 
   try {
-    const res = await api("/pay/execute", {
+    const res = await api(endpoint, {
       method: "POST",
       body: { session_id: state.sessionId, txn_id: txnId },
     });
 
-    if (res.ok) {
+    if (res.ok && endpoint === "/bpay/execute") {
+      payBtn.outerHTML = `
+        <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-1">
+          <div class="text-emerald-300 font-medium">BPAY payment ${escapeHtml(res.final_status)}</div>
+          <div class="text-[11px] text-emerald-500/80 font-mono">${escapeHtml(res.simulated_reference)}</div>
+          <div class="text-[10px] text-slate-500">${escapeHtml(res.note)}</div>
+        </div>`;
+    } else if (res.ok) {
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-2">
           <div>
@@ -509,7 +666,84 @@ function refreshAuditIfOpen() {
 // --- Setup tab: payees & payment methods ----------------------------------------
 
 async function loadSetupData() {
-  await Promise.all([loadPayees(), loadPaymentMethods()]);
+  await Promise.all([loadPayees(), loadPaymentMethods(), loadPasskeys(), loadBpayBillers()]);
+}
+
+async function loadPasskeys() {
+  try {
+    const res = await api("/webauthn/credentials");
+    renderPasskeyList(res.credentials);
+  } catch (err) {
+    passkeyList.innerHTML = `<p class="text-rose-400 text-xs">Failed to load: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderPasskeyList(credentials) {
+  if (!credentials.length) {
+    passkeyList.innerHTML = `<p class="text-slate-500 text-xs">No passkeys yet — PIN step-ups still work either way.</p>`;
+    return;
+  }
+  passkeyList.innerHTML = credentials
+    .map(
+      (c) => `
+      <div class="bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs flex items-center justify-between">
+        <span>${escapeHtml(c.label || "Passkey")}</span>
+        <span class="text-slate-500 font-mono text-[10px]">${escapeHtml(c.credential_id.slice(0, 10))}…</span>
+      </div>`
+    )
+    .join("");
+}
+
+if (!window.PublicKeyCredential) {
+  registerPasskeyBtn.disabled = true;
+  registerPasskeyBtn.title = "Passkeys aren't supported in this browser";
+}
+
+registerPasskeyBtn.addEventListener("click", async () => {
+  registerPasskeyBtn.disabled = true;
+  passkeyFeedback.textContent = "Follow your browser/device prompt…";
+  passkeyFeedback.className = "text-[11px] h-4 mt-1 text-slate-400";
+  try {
+    const res = await registerPasskey("This device");
+    if (res.ok) {
+      passkeyFeedback.textContent = "Passkey registered.";
+      passkeyFeedback.className = "text-[11px] h-4 mt-1 text-emerald-400";
+      loadPasskeys();
+    } else {
+      passkeyFeedback.textContent = res.error || "Failed to register passkey.";
+      passkeyFeedback.className = "text-[11px] h-4 mt-1 text-rose-400";
+    }
+  } catch (err) {
+    passkeyFeedback.textContent = `Failed: ${err.message}`;
+    passkeyFeedback.className = "text-[11px] h-4 mt-1 text-rose-400";
+  } finally {
+    registerPasskeyBtn.disabled = false;
+  }
+});
+
+async function loadBpayBillers() {
+  try {
+    const res = await api("/bpay/billers");
+    renderBpayBillerList(res.billers);
+  } catch (err) {
+    bpayBillerList.innerHTML = `<p class="text-rose-400 text-xs">Failed to load: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function renderBpayBillerList(billers) {
+  if (!billers.length) {
+    bpayBillerList.innerHTML = `<p class="text-slate-500 text-xs">No saved billers yet.</p>`;
+    return;
+  }
+  bpayBillerList.innerHTML = billers
+    .map(
+      (b) => `
+      <div class="bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs">
+        <div class="font-medium">${escapeHtml(b.nickname)}</div>
+        <div class="text-slate-500 font-mono mt-0.5">Code ${escapeHtml(b.biller_code)} · CRN ${escapeHtml(b.crn)}</div>
+      </div>`
+    )
+    .join("");
 }
 
 async function loadPayees() {

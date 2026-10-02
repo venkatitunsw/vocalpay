@@ -119,6 +119,12 @@ _MIGRATIONS = {
         "stripe_transfer_id": "TEXT",
         "destination_account_id": "TEXT",
         "receiver_confirmed_at": "TEXT",
+        "rail": "TEXT NOT NULL DEFAULT 'payid'",
+        "bpay_biller_code": "TEXT",
+        "bpay_crn": "TEXT",
+    },
+    "confirmations": {
+        "challenge": "TEXT",  # WebAuthn challenge bound to this confirmation, when required_confirmation="passkey"
     },
 }
 

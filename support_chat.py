@@ -14,6 +14,14 @@ from stripe_service import get_account_balance
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
+# Which LLM backend powers the agent: "gemini" (default, needs GEMINI_API_KEY)
+# or "ollama" (a self-hosted model, e.g. Qwen 2.5, reached over the network --
+# needs OLLAMA_BASE_URL). Switching providers never changes the tools, system
+# prompt, or memory layer below -- only which model answers.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+
 SYSTEM_PROMPT = (
     "You are VocalPay's customer support assistant. Answer questions about the user's contacts, "
     "payments, and receiver balances using your tools -- never guess or invent an amount, status, "
@@ -29,16 +37,30 @@ SYSTEM_PROMPT = (
 _agent = None
 
 
+def _build_model():
+    if LLM_PROVIDER == "ollama":
+        from langchain_ollama import ChatOllama
+
+        # No API key needed -- this calls a self-hosted Ollama server over
+        # plain HTTP. If OLLAMA_BASE_URL is unreachable, this raises at
+        # first use (a connection error), not here at construction time.
+        return ChatOllama(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, temperature=0.3)
+
+    if LLM_PROVIDER != "gemini":
+        raise RuntimeError(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}' -- expected 'gemini' or 'ollama'")
+
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing GEMINI_API_KEY in environment/.env")
+    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=api_key, temperature=0.3)
+
+
 def _get_agent():
     global _agent
     if _agent is None:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Missing GEMINI_API_KEY in environment/.env")
-        model = ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=api_key, temperature=0.3)
-        _agent = create_agent(model, tools=_build_tools(), system_prompt=SYSTEM_PROMPT)
+        _agent = create_agent(_build_model(), tools=_build_tools(), system_prompt=SYSTEM_PROMPT)
     return _agent
 
 
