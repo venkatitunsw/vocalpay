@@ -47,11 +47,12 @@ const bpayBillerList = document.getElementById("bpay-biller-list");
 
 // --- API helper -------------------------------------------------------------
 
-async function api(path, { method = "GET", body } = {}) {
+async function api(path, { method = "GET", body, signal } = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok) {
     throw new Error(`${method} ${path} -> HTTP ${res.status}`);
@@ -288,7 +289,13 @@ async function handleCommandResponse(res, originalText) {
     if (res.decision) {
       // A recognized payment command that was policy CLARIFY/BLOCK'd — not a
       // parse failure, so this stays as-is rather than going to support chat.
-      appendErrorBubble(`${res.decision.decision}: ${res.decision.reason}`);
+      if (res.decision.decision === "CLARIFY" && res.candidate_payees && res.candidate_payees.length) {
+        // Let the user just click the contact they meant, instead of having
+        // to retype the full command with a disambiguating PayID.
+        renderClarifyPickerCard(res);
+      } else {
+        appendErrorBubble(`${res.decision.decision}: ${res.decision.reason}`);
+      }
     } else {
       // Didn't parse as a payment command at all — hand it to the support
       // chatbot instead of just showing a raw parser error. It remembers
@@ -303,12 +310,58 @@ async function handleCommandResponse(res, originalText) {
   renderConfirmationCard(res);
 }
 
+function renderClarifyPickerCard(res) {
+  const card = appendCard();
+  const { amount, currency } = res.intent;
+  card.innerHTML = `
+    <div class="text-xs uppercase tracking-wide text-slate-400">Which one did you mean?</div>
+    <div class="text-sm">${money(amount, currency)} to one of these:</div>
+    <div class="flex flex-col gap-2 mt-1">
+      ${res.candidate_payees
+        .map(
+          (c, i) => `
+        <button type="button" class="clarify-pick-btn text-left bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm transition" data-idx="${i}">
+          <div class="font-medium">${escapeHtml(c.nickname)}</div>
+          ${c.phone_number ? `<div class="text-[11px] text-slate-500 font-mono">PayID: ${escapeHtml(c.phone_number)}</div>` : ""}
+        </button>`
+        )
+        .join("")}
+    </div>
+  `;
+
+  card.querySelectorAll(".clarify-pick-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      card.querySelectorAll(".clarify-pick-btn").forEach((b) => (b.disabled = true));
+      const chosen = res.candidate_payees[Number(btn.dataset.idx)];
+      const target = chosen.phone_number || chosen.nickname;
+      const retryText = `Pay ${amount} to ${target}`;
+      appendUserBubble(chosen.nickname);
+      card.remove();
+      try {
+        const retryRes = await api("/command/text", {
+          method: "POST",
+          body: { session_id: state.sessionId, text: retryText },
+        });
+        await handleCommandResponse(retryRes, retryText);
+      } catch (err) {
+        appendErrorBubble(`Request failed: ${err.message}`);
+      } finally {
+        refreshAuditIfOpen();
+      }
+    });
+  });
+}
+
 async function askSupportChat(message) {
-  const thinking = appendAssistantBubble("…");
+  const thinking = appendAssistantBubble("Thinking… (this runs on your local model and can take a minute or more on CPU)");
+  const controller = new AbortController();
+  const timeoutMs = 120000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await api("/support/chat", {
       method: "POST",
       body: { session_id: state.sessionId, message },
+      signal: controller.signal,
     });
     if (res.ok) {
       thinking.querySelector("div").textContent = res.reply;
@@ -318,7 +371,16 @@ async function askSupportChat(message) {
     }
   } catch (err) {
     thinking.remove();
-    appendErrorBubble(`Request failed: ${err.message}`);
+    if (err.name === "AbortError") {
+      appendErrorBubble(
+        `Your local model took longer than ${Math.round(timeoutMs / 1000)}s to respond and was cancelled. ` +
+          `A smaller/faster model, or running Ollama with GPU support, would speed this up.`
+      );
+    } else {
+      appendErrorBubble(`Request failed: ${err.message}`);
+    }
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
