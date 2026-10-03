@@ -640,8 +640,8 @@ written out and verified against the actual code before anything was changed. Fu
 
 | # | Scenario | Verdict |
 | --- | --- | --- |
-| A1 | `"pay alice"` (verb + bare name, no amount) | **Fixed** — the reported bug |
-| A2 | `"send 20"` (verb + bare amount, no recipient) | **Fixed** — same class as A1 |
+| A1 | `"pay alice"` (verb + bare name, no amount) | **Fixed** — the reported bug. Answers instantly with "How much would you like to pay alice?", and `state.pendingSlotFill` (`frontend/app.js`) remembers the question so a bare follow-up reply like `"30"` completes it (synthesizes `"Pay 30 to alice"` through the normal `/command/text` path) instead of being sent to the chatbot with no context — this loop-completion was a follow-up fix after the first version only asked the question without listening for the answer |
+| A2 | `"send 20"` (verb + bare amount, no recipient) | **Fixed** — same class as A1, same loop-completion (a bare name/PayID reply answers "who to?") |
 | A3 | `"pay attention to this"` / `"send me my last transactions"` — idiomatic/informational text that happens to start with a payment verb | Confirmed these fail `intent_parser.py` with the *same* error text as A1/A2 — the fix had to be shape-based (exactly one trailing word), not error-text-based, specifically so these keep reaching the chatbot |
 | A4 | Case/whitespace variance, self-correction, PayID-vs-name targets, no-preposition phrasing, explicit-PayID-qualified names | Already covered by existing parser tests |
 | A5 | Non-English payment phrasing | Accepted limitation — the parser only recognizes English verbs |
