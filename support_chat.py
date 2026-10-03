@@ -18,6 +18,13 @@ from stripe_service import get_account_balance
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+# Bounds how long a single Ollama call can run server-side. /support/chat
+# runs as a plain sync endpoint (FastAPI's sync thread pool), so a hung call
+# without this would tie up a worker thread indefinitely -- enough of those
+# stacking up could stall unrelated endpoints sharing the same pool. The
+# frontend's own ~120s AbortController timeout is a backstop for this, not
+# the primary defense.
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "90"))
 
 SYSTEM_PROMPT = (
     "You are VocalPay's customer support assistant. Answer questions about the user's contacts, "
@@ -42,8 +49,16 @@ def _build_model():
 
     # No API key needed -- this calls a self-hosted Ollama server over plain
     # HTTP. If OLLAMA_BASE_URL is unreachable, this raises at first use (a
-    # connection error), not here at construction time.
-    return ChatOllama(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, temperature=0.3)
+    # connection error), not here at construction time. client_kwargs is
+    # passed straight to the underlying `ollama` package's Client, which
+    # wraps httpx and honors `timeout` -- confirmed via
+    # `ChatOllama(...)._client._client.timeout`.
+    return ChatOllama(
+        base_url=OLLAMA_BASE_URL,
+        model=OLLAMA_MODEL,
+        temperature=0.3,
+        client_kwargs={"timeout": OLLAMA_TIMEOUT_SECONDS},
+    )
 
 
 def _get_agent():

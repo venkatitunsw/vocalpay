@@ -1081,6 +1081,16 @@ def test_llm_provider_switches_to_ollama_without_api_key(monkeypatch):
     assert model.model == support_chat.OLLAMA_MODEL
 
 
+def test_ollama_model_has_server_side_timeout(monkeypatch):
+    # A hung/slow Ollama call must fail on a bound, server-side -- otherwise
+    # it ties up a FastAPI sync-thread-pool worker indefinitely, which (with
+    # enough of them) can stall unrelated endpoints sharing that pool.
+    monkeypatch.setattr(support_chat, "LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(support_chat, "OLLAMA_TIMEOUT_SECONDS", 42.0)
+    model = support_chat._build_model()
+    assert model._client._client.timeout.connect == 42.0
+
+
 def test_llm_provider_unknown_value_raises_clear_error(monkeypatch):
     monkeypatch.setattr(support_chat, "LLM_PROVIDER", "something-else")
     try:

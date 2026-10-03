@@ -280,6 +280,7 @@ composer.addEventListener("submit", async (e) => {
   appendUserBubble(text);
   textInput.value = "";
   sendBtn.disabled = true;
+  textInput.disabled = true; // not just the button -- Enter-to-submit can bypass a disabled submit button in some browsers
 
   try {
     const draft = state.activeDraft;
@@ -336,6 +337,8 @@ composer.addEventListener("submit", async (e) => {
     appendErrorBubble(`Request failed: ${err.message}`);
   } finally {
     sendBtn.disabled = false;
+    textInput.disabled = false;
+    textInput.focus();
     refreshAuditIfOpen();
   }
 });
@@ -367,6 +370,16 @@ async function handleBpayCommandResponse(res, originalText) {
   );
 }
 
+// A bare "<verb> <one word>" with nothing else — e.g. "pay alice" or
+// "send 20" — is always an incomplete payment attempt, never a sensible
+// chatbot question, and the chatbot has no tools to complete a payment
+// anyway. Deliberately narrow (exactly one trailing token) so it doesn't
+// swallow idiomatic/informational phrasing that happens to start with the
+// same verb ("pay attention to this", "send me my last transactions" both
+// have 2+ trailing words and correctly fall through to the chatbot below).
+const VERB_PLUS_BARE_NAME_RE = /^(pay|send|transfer)\s+([a-zA-Z][a-zA-Z'-]*)\s*$/i;
+const VERB_PLUS_BARE_AMOUNT_RE = /^(pay|send|transfer)\s+(\d+(?:\.\d+)?)\s*$/i;
+
 async function handleCommandResponse(res, originalText) {
   if (!res.ok) {
     if (res.decision) {
@@ -379,11 +392,21 @@ async function handleCommandResponse(res, originalText) {
       } else {
         appendErrorBubble(`${res.decision.decision}: ${res.decision.reason}`);
       }
+      return;
+    }
+
+    const bareNameMatch = VERB_PLUS_BARE_NAME_RE.exec(originalText);
+    const bareAmountMatch = VERB_PLUS_BARE_AMOUNT_RE.exec(originalText);
+    if (bareNameMatch) {
+      appendErrorBubble(`How much would you like to pay ${bareNameMatch[2]}? Try: "Pay 12 to ${bareNameMatch[2]}".`);
+    } else if (bareAmountMatch) {
+      appendErrorBubble(`Who would you like to send ${bareAmountMatch[2]} to? Try: "Pay ${bareAmountMatch[2]} to John".`);
     } else {
-      // Didn't parse as a payment command at all — hand it to the support
-      // chatbot instead of just showing a raw parser error. It remembers
-      // past conversations and can look up real contacts/transactions, but
-      // never moves money itself.
+      // Didn't parse as a payment command at all, and doesn't look like an
+      // incomplete one either — hand it to the support chatbot instead of
+      // just showing a raw parser error. It remembers past conversations
+      // and can look up real contacts/transactions, but never moves money
+      // itself.
       await askSupportChat(originalText);
     }
     return;
