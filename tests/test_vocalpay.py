@@ -171,6 +171,88 @@ def test_expired_confirmation_is_rejected(client):
     assert "CONFIRMATION_EXPIRED" in event_types
 
 
+# --- User-initiated cancellation of a pending confirmation ---
+
+def test_confirm_cancel_pending_confirmation(client):
+    from confirmations_repo import create_confirmation
+    from transactions_repo import create_pending_transaction, get_transaction
+
+    session_id = _new_session(client)
+    txn_id = create_pending_transaction(
+        session_id=session_id, user_id="demo-user", amount_cents=200, currency="AUD", payee_id=None,
+    )
+    conf = create_confirmation(txn_id=txn_id, user_id="demo-user", required_confirmation="normal")
+
+    r = client.post(
+        "/confirm/cancel",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"]},
+    )
+    assert r.json() == {"ok": True, "txn_id": txn_id}
+    assert get_transaction(txn_id)["status"] == "failed"
+
+    events = client.get(f"/audit/{session_id}/events").json()["events"]
+    assert "CONFIRM_CANCELLED" in [e["event_type"] for e in events]
+
+    # Already cancelled -- a second attempt is a clear no-op, not a crash.
+    r2 = client.post(
+        "/confirm/cancel",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"]},
+    )
+    assert r2.json() == {"ok": False, "error": "Confirmation is cancelled"}
+
+    # And since it's no longer pending, confirming it afterward is refused too.
+    r3 = client.post(
+        "/confirm/normal",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"], "phrase": "CONFIRM"},
+    )
+    assert r3.json() == {"ok": False, "error": "Confirmation is cancelled"}
+
+
+def test_confirm_cancel_already_approved_is_rejected(client):
+    from confirmations_repo import create_confirmation
+    from transactions_repo import create_pending_transaction
+
+    session_id = _new_session(client)
+    txn_id = create_pending_transaction(
+        session_id=session_id, user_id="demo-user", amount_cents=200, currency="AUD", payee_id=None,
+    )
+    conf = create_confirmation(txn_id=txn_id, user_id="demo-user", required_confirmation="normal")
+    client.post(
+        "/confirm/normal",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"], "phrase": "CONFIRM"},
+    )
+
+    r = client.post(
+        "/confirm/cancel",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"]},
+    )
+    assert r.json() == {"ok": False, "error": "Confirmation is approved"}
+
+
+def test_confirm_cancel_expired_confirmation_is_rejected(client):
+    from confirmations_repo import create_confirmation
+    from transactions_repo import create_pending_transaction
+
+    session_id = _new_session(client)
+    txn_id = create_pending_transaction(
+        session_id=session_id, user_id="demo-user", amount_cents=200, currency="AUD", payee_id=None,
+    )
+    conf = create_confirmation(txn_id=txn_id, user_id="demo-user", required_confirmation="normal", ttl_seconds=-1)
+    client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": conf["confirmation_id"], "phrase": "CONFIRM"})
+
+    r = client.post(
+        "/confirm/cancel",
+        json={"session_id": session_id, "confirmation_id": conf["confirmation_id"]},
+    )
+    assert r.json() == {"ok": False, "error": "Confirmation is expired"}
+
+
+def test_confirm_cancel_unknown_confirmation_id(client):
+    session_id = _new_session(client)
+    r = client.post("/confirm/cancel", json={"session_id": session_id, "confirmation_id": "nonexistent"})
+    assert r.json() == {"ok": False, "error": "Confirmation not found"}
+
+
 # --- Audit hash chain: tampering with a stored event breaks verification ---
 
 def test_audit_chain_detects_tampering(client):

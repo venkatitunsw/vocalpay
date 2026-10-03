@@ -1054,6 +1054,38 @@ def confirm_passkey(req: ConfirmPasskeyRequest):
     return {"ok": True, "txn_id": conf["txn_id"], "status": "confirmed"}
 
 
+class ConfirmCancelRequest(BaseModel):
+    session_id: str
+    confirmation_id: str
+
+
+@app.post("/confirm/cancel")
+def confirm_cancel(req: ConfirmCancelRequest):
+    """
+    User-initiated cancellation of a pending confirmation -- e.g. the user
+    typed a correction ("no actually pay Alice Wonderland") or "cancel" into
+    the main chat while a card was still awaiting CONFIRM/PIN/passkey. Mirrors
+    _expire_confirmation() above, but user-triggered instead of TTL-triggered.
+    Only ever moves a *pending* confirmation to a terminal, non-approved
+    state -- it can't approve, create, or reopen anything, so it carries no
+    new risk to the payment flow.
+    """
+    conf = get_confirmation(req.confirmation_id)
+    if not conf:
+        return {"ok": False, "error": "Confirmation not found"}
+
+    if conf["status"] != "pending":
+        return {"ok": False, "error": f"Confirmation is {conf['status']}"}
+
+    from confirmations_repo import set_confirmation_status
+    set_confirmation_status(req.confirmation_id, "cancelled")
+    update_transaction_status(conf["txn_id"], "failed")
+    append_event(req.session_id, "CONFIRM_CANCELLED", {
+        "confirmation_id": req.confirmation_id, "txn_id": conf["txn_id"],
+    })
+    return {"ok": True, "txn_id": conf["txn_id"]}
+
+
 def _bpay_confirmation_requirement(amount_cents: int) -> str:
     # Same $50 AUD step-up cap as the PayID rail (policy.py DEFAULT_HARD_CAP_AUD),
     # applied directly since BPAY has no "known payee" concept to key off.

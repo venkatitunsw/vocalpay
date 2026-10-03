@@ -13,6 +13,12 @@ const state = {
   sessionId: null,
   panelOpen: false,
   activeTab: "setup", // "setup" | "audit"
+  // The most recently rendered confirmation card still awaiting CONFIRM/PIN/
+  // passkey, if any — lets the main composer recognize "no actually X" /
+  // "cancel" as being about THIS pending payment instead of either trying
+  // to parse it as an unrelated new command or asking the chatbot. Cleared
+  // the moment that card is confirmed, cancelled, or superseded.
+  activeDraft: null, // { confirmationId, txnId, amount, currency } | null
 };
 
 const feed = document.getElementById("feed");
@@ -226,6 +232,46 @@ async function initSession() {
 
 // --- Command flow --------------------------------------------------------------
 
+// Only ever consulted when state.activeDraft is set (a confirmation card is
+// still open) — these decide whether a composer message is about THAT
+// pending payment (cancel it / redirect it) rather than an unrelated new
+// command or a chatbot question. Deliberately simple, deterministic pattern
+// matching — no LLM involvement in anything that can affect a payment.
+// (No "g" flag: these are reused via .test() across many messages, and a
+// global flag there would make .test() stateful/unreliable across calls.)
+const DRAFT_CANCEL_RE = /\b(cancel|stop|nevermind|never mind|forget it|forget that|scratch that|abort)\b/i;
+// A leading "no" (e.g. "No, 0400111222") is anchored to the START of the
+// message specifically so it doesn't fire on an unrelated sentence that
+// merely contains the word "no" ("I have no idea what you mean").
+const DRAFT_CORRECTION_RE = /^\s*no+\b|\b(actually|instead|wait|sorry,?\s*i meant|i meant)\b/i;
+const DRAFT_LEADING_NO_RE = /^\s*no+,?\s*/i;
+const DRAFT_FILLER_WORDS_RE = /\b(actually|instead|wait|sorry,?\s*i meant|i meant|cancel|stop|nevermind|never mind|forget it|forget that|scratch that|abort)\b/gi;
+
+async function cancelActiveDraft() {
+  const draft = state.activeDraft;
+  if (!draft) return { ok: false, error: "No active draft", draft: null };
+  state.activeDraft = null;
+  try {
+    const res = await api("/confirm/cancel", {
+      method: "POST",
+      body: { session_id: state.sessionId, confirmation_id: draft.confirmationId },
+    });
+    return { ...res, draft };
+  } catch (err) {
+    return { ok: false, error: err.message, draft };
+  }
+}
+
+function markDraftCardCancelled(cardEl, message) {
+  if (!cardEl) return;
+  const form = cardEl.querySelector(".pin-form, .normal-form");
+  const notice = document.createElement("div");
+  notice.className = "text-slate-500 text-xs font-medium";
+  notice.textContent = message;
+  if (form) form.replaceWith(notice);
+  cardEl.querySelectorAll(".use-passkey-btn, .feedback, .save-contact-row").forEach((el) => el.remove());
+}
+
 composer.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = textInput.value.trim();
@@ -236,6 +282,43 @@ composer.addEventListener("submit", async (e) => {
   sendBtn.disabled = true;
 
   try {
+    const draft = state.activeDraft;
+    const looksLikeQuestion = text.endsWith("?");
+
+    // A pending card is open, and this message reads as being about it
+    // (never on a question — "wait, what's my balance?" is still just a
+    // question) rather than an unrelated command/chatbot message.
+    if (draft && !looksLikeQuestion && DRAFT_CANCEL_RE.test(text) && !DRAFT_CORRECTION_RE.test(text)) {
+      const cancelResult = await cancelActiveDraft();
+      markDraftCardCancelled(draft.cardEl, "Cancelled");
+      appendAssistantBubble(
+        cancelResult.ok ? "Cancelled that payment." : "That payment wasn't still pending, so there was nothing to cancel."
+      );
+      return;
+    }
+
+    if (draft && !looksLikeQuestion && DRAFT_CORRECTION_RE.test(text)) {
+      const strippedTarget = text
+        .replace(DRAFT_LEADING_NO_RE, "")
+        .replace(DRAFT_FILLER_WORDS_RE, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (strippedTarget) {
+        await cancelActiveDraft();
+        markDraftCardCancelled(draft.cardEl, "Cancelled — redirected");
+        const retryText = `Pay ${draft.amount} to ${strippedTarget}`;
+        const retryRes = await api("/command/text", {
+          method: "POST",
+          body: { session_id: state.sessionId, text: retryText },
+        });
+        await handleCommandResponse(retryRes, retryText);
+        return;
+      }
+      // Correction language with no extractable new target ("wait, let me
+      // think") — nothing concrete to redirect to, so leave the draft open
+      // and fall through to normal routing below rather than guessing.
+    }
+
     if (/\bbpay\b/i.test(text)) {
       const res = await api("/bpay/command", {
         method: "POST",
@@ -392,6 +475,14 @@ function renderConfirmationCard(cmdRes, opts = {}) {
   const required = confirmation.required_confirmation;
   const executeEndpoint = opts.executeEndpoint || "/pay/execute";
   const rail = opts.rail || "payid";
+
+  state.activeDraft = {
+    confirmationId: confirmation.confirmation_id,
+    txnId: txn_id,
+    amount: intent.amount,
+    currency: intent.currency,
+    cardEl: card,
+  };
 
   const header = `
     <div class="flex items-center justify-between">
@@ -603,6 +694,12 @@ async function handleConfirmResult(card, form, feedback, res, txnId, executeEndp
   confirmedNotice.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>Confirmed`;
   form.replaceWith(confirmedNotice);
   card.querySelectorAll(".use-passkey-btn").forEach((el) => el.remove());
+
+  // Once confirmed, a correction/cancel typed in the composer no longer has
+  // anything pending to act on for this card.
+  if (state.activeDraft && state.activeDraft.txnId === txnId) {
+    state.activeDraft = null;
+  }
 
   const payBtn = document.createElement("button");
   payBtn.className = "w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold py-2.5 rounded-lg transition";
