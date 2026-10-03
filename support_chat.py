@@ -12,13 +12,10 @@ from payees_repo import find_payees_by_name
 from transactions_repo import list_recent_transactions, get_transaction
 from stripe_service import get_account_balance
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-
-# Which LLM backend powers the agent: "gemini" (default, needs GEMINI_API_KEY)
-# or "ollama" (a self-hosted model, e.g. Qwen 2.5, reached over the network --
-# needs OLLAMA_BASE_URL). Switching providers never changes the tools, system
-# prompt, or memory layer below -- only which model answers.
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+# Self-hosted only, deliberately -- no cloud LLM API (Gemini, OpenAI, etc.)
+# anywhere in this app. Needs a real Ollama server reachable at
+# OLLAMA_BASE_URL; no API key involved.
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 
@@ -32,29 +29,21 @@ SYSTEM_PROMPT = (
     "Keep answers short and conversational, like a real support agent, not a wall of text."
 )
 
-# One agent instance per process — cheap to reuse, and avoids re-authenticating
-# with Gemini on every single chat message.
+# One agent instance per process — cheap to reuse, and avoids reconnecting to
+# the Ollama server on every single chat message.
 _agent = None
 
 
 def _build_model():
-    if LLM_PROVIDER == "ollama":
-        from langchain_ollama import ChatOllama
+    if LLM_PROVIDER != "ollama":
+        raise RuntimeError(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}' -- only 'ollama' is supported")
 
-        # No API key needed -- this calls a self-hosted Ollama server over
-        # plain HTTP. If OLLAMA_BASE_URL is unreachable, this raises at
-        # first use (a connection error), not here at construction time.
-        return ChatOllama(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, temperature=0.3)
+    from langchain_ollama import ChatOllama
 
-    if LLM_PROVIDER != "gemini":
-        raise RuntimeError(f"Unknown LLM_PROVIDER '{LLM_PROVIDER}' -- expected 'gemini' or 'ollama'")
-
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing GEMINI_API_KEY in environment/.env")
-    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=api_key, temperature=0.3)
+    # No API key needed -- this calls a self-hosted Ollama server over plain
+    # HTTP. If OLLAMA_BASE_URL is unreachable, this raises at first use (a
+    # connection error), not here at construction time.
+    return ChatOllama(base_url=OLLAMA_BASE_URL, model=OLLAMA_MODEL, temperature=0.3)
 
 
 def _get_agent():

@@ -13,13 +13,14 @@
 # exactly as before (fine for local dev, but back to resetting on every
 # restart in production).
 #
-# Known limitation of this free deployment target: faster-whisper (local
-# voice transcription, voice_service.py) and a self-hosted Ollama model both
-# need real CPU/RAM/GPU this free instance doesn't have -- voice
-# transcription will likely fail or OOM here, and LLM_PROVIDER=ollama needs
-# OLLAMA_BASE_URL pointed at a real server you run elsewhere. Gemini
-# (LLM_PROVIDER=gemini, the default) and PIN-based confirmation work fine on
-# this plan either way.
+# Known limitation of this free deployment target: the support chatbot runs
+# ONLY on a self-hosted Ollama model (support_chat.py) -- no cloud LLM API is
+# used anywhere in this app. faster-whisper (local voice transcription,
+# voice_service.py) and Ollama both need real CPU/RAM/GPU this free instance
+# doesn't have, so OLLAMA_BASE_URL must point at a real server you run
+# elsewhere for /support/chat to work here; without it, that endpoint
+# returns a clear connection error rather than crashing the app. Payments
+# (PayID, BPAY, PIN/passkey confirmation) are unaffected either way.
 services:
   - type: web
     name: vocalpay
@@ -36,12 +37,10 @@ services:
         sync: false # e.g. libsql://vocalpay-<your-org>.turso.io — from `turso db show vocalpay --url`
       - key: TURSO_AUTH_TOKEN
         sync: false # from `turso db tokens create vocalpay`
-      - key: GEMINI_API_KEY
-        sync: false # from https://aistudio.google.com/apikey — powers the support chatbot (support_chat.py)
-      - key: LLM_PROVIDER
-        value: gemini # "gemini" (default) or "ollama" — see support_chat.py
       - key: OLLAMA_BASE_URL
-        sync: false # only used when LLM_PROVIDER=ollama — your self-hosted Ollama server's URL
+        sync: false # required for /support/chat to work — your self-hosted Ollama server's URL
+      - key: OLLAMA_MODEL
+        value: qwen2.5:7b-instruct
       - key: WEBAUTHN_RP_ID
         value: vocalpay.onrender.com # must exactly match the serving domain, no scheme/port
       - key: WEBAUTHN_RP_NAME

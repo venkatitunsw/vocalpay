@@ -119,7 +119,7 @@ Fixed by making [db.py](db.py) storage-backend-aware:
 - `render.yaml` declares `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` as `sync: false` env vars (set manually in
   the Render dashboard, never committed) alongside `STRIPE_SECRET_KEY`.
 
-## 2c. Support chatbot — LangChain + Gemini, memory across sessions — new
+## 2c. Support chatbot — LangChain + self-hosted Ollama, memory across sessions — new
 
 A second, separate pipeline alongside the deterministic payment flow: when a chat message *doesn't* parse as
 a payment command (`/command/text` returns `ok:false` with no `decision` — i.e. genuinely unparseable, not a
@@ -142,31 +142,40 @@ parser error. This is a deliberate split, not a convenience shortcut:
   conversations even after closing the tab or a Render cold start (once Turso persistence, §2b, is wired up).
   `_load_history()`/`_save_message()` load the last 20 turns as LangChain `HumanMessage`/`AIMessage` objects
   and append the new exchange after each reply.
-- **Model**: Google Gemini (`gemini-3.6-flash` by default, overridable via `GEMINI_MODEL`) via
-  `langchain-google-genai`, orchestrated with `langchain.agents.create_agent()` (LangChain 1.x's tool-calling
-  agent loop). Requires a `GEMINI_API_KEY` env var (from https://aistudio.google.com/apikey) — the agent, and
-  the Gemini client inside it, are constructed lazily on first use, and a missing key surfaces as a clear
-  `{"ok": false, "error": "Missing GEMINI_API_KEY..."}` rather than crashing the app or the endpoint.
+- **Model**: a self-hosted model via Ollama (`qwen2.5:7b-instruct` by default, overridable via
+  `OLLAMA_MODEL`), reached over plain HTTP at `OLLAMA_BASE_URL` (default `http://localhost:11434`) using
+  `langchain-ollama`'s `ChatOllama`, orchestrated with `langchain.agents.create_agent()` (LangChain 1.x's
+  tool-calling agent loop). **No cloud LLM API of any kind is used anywhere in this app** — a deliberate
+  choice, not just a default; see §2d for why Gemini specifically was removed. No API key involved: an
+  unreachable `OLLAMA_BASE_URL` fails clearly at first use (a connection error) rather than at startup, and
+  `LLM_PROVIDER` is no longer a real choice (only `"ollama"` is accepted — kept as a named setting rather than
+  hardcoded so a future alternative self-hosted backend could still be added the same way).
 - Every turn is also audit-logged (`SUPPORT_CHAT_MESSAGE`/`SUPPORT_CHAT_REPLY`/`SUPPORT_CHAT_FAILED`), same as
   every other action in the app.
-- `render.yaml` declares `GEMINI_API_KEY` as a `sync: false` env var alongside the others.
-- **Content-extraction quirk (fixed)**: `langchain-google-genai` sometimes returns a reply's content as a real
-  list of typed blocks, and sometimes as an already-stringified repr of that same list (observed live,
-  inconsistent between calls on the same model). `_extract_text()` in `support_chat.py` detects and parses
-  the stringified form too (`ast.literal_eval`) before pulling out just the text — otherwise raw internal
-  signature/metadata leaked into replies and into persisted chat history.
+- `render.yaml` declares `OLLAMA_BASE_URL`/`OLLAMA_MODEL` as env vars — `OLLAMA_BASE_URL` is `sync: false`
+  (you must point it at a real server you run; Render's free plan can't host Ollama itself).
 
-## 2d. Swappable LLM backend — Gemini or self-hosted Ollama — new
+## 2d. Gemini was removed entirely — self-hosted Ollama only
 
-`support_chat.py`'s `_build_model()` picks the backend from `LLM_PROVIDER` (`"gemini"`, the default, or
-`"ollama"`) without touching the tools, system prompt, or memory layer above — only which model answers
-changes. `LLM_PROVIDER=ollama` uses `langchain-ollama`'s `ChatOllama` against `OLLAMA_BASE_URL` (default
-`http://localhost:11434`) and `OLLAMA_MODEL` (default `qwen2.5:7b-instruct`, matching the blueprint's choice of
-model) — no API key needed, just a reachable server. **This needs real compute VocalPay's free Render
-instance doesn't have**: either run Ollama on your own machine/GPU box and point `OLLAMA_BASE_URL` at it (not
-reachable from Render unless that box has a public address), or don't use this provider in that deployment.
-Verified: constructing the model with the provider switched doesn't require network access until first actual
-use, so an unreachable Ollama server fails clearly at call time, not at startup.
+This app briefly used Google Gemini (`langchain-google-genai`) as the support chatbot's default backend, with
+Ollama as an opt-in alternative. **Gemini has since been removed completely** — not just switched off by
+default — at the user's explicit request to have no cloud LLM API anywhere in the app:
+
+- `langchain-google-genai` is no longer a dependency (`requirements.txt`).
+- `support_chat.py`'s `_build_model()` only builds `ChatOllama`; the Gemini branch, `GEMINI_MODEL` constant,
+  and `GEMINI_API_KEY` handling are gone, not just unreachable.
+- `render.yaml` and `.env.example` no longer reference `GEMINI_API_KEY`.
+- A LangChain SDK quirk found and fixed along the way, in case it resurfaces with another provider:
+  `langchain_core` message content sometimes arrives as a real list of typed blocks, and sometimes as an
+  already-stringified repr of that same list (observed live with Gemini, inconsistent between calls on the
+  same model). `_extract_text()` in `support_chat.py` detects and parses the stringified form too
+  (`ast.literal_eval`) before pulling out just the text — otherwise raw internal signature/metadata could leak
+  into a reply or into persisted chat history. Kept in place since it's cheap insurance against the same
+  pattern recurring with Ollama's own response shapes.
+- **This means the support chatbot needs you to run a real Ollama server and point `OLLAMA_BASE_URL` at it** —
+  there is no fallback cloud provider anymore. Without it, `/support/chat` returns a connection-error message
+  instead of crashing; payments (PayID, BPAY, PIN/passkey confirmation) are completely unaffected either way,
+  since the chatbot was always a separate pipeline from them (§2c).
 
 ## 2e. Passkeys (FIDO2/WebAuthn) — an additional step-up method alongside PIN — new
 
@@ -633,7 +642,7 @@ security.py              PIN hashing/verification (PBKDF2)
 audit.py                 Hash-chained append-only audit log
 db.py                    DB connection (SQLite locally, Turso/libSQL in prod — see §2b) + schema init + migrations
 db/schema.sql            Table definitions (payees + transactions include receiver-evidence columns)
-support_chat.py          LangChain support chatbot (Gemini or Ollama, §2d): read-only tools, per-user DB memory — see §2c
+support_chat.py          LangChain support chatbot (self-hosted Ollama only, §2d): read-only tools, per-user DB memory — see §2c
 passkey_service.py       WebAuthn registration/authentication via py_webauthn — see §2e
 passkey_repo.py          Passkey credential CRUD + sign-count tracking
 voice_service.py         Local speech-to-text (faster-whisper) + spoken-number normalization — see §2f
@@ -654,7 +663,7 @@ create_stripe_pm.py      Dev script: seed a Stripe test card/customer
 VocalPay_System_Blueprint.docx  The architectural blueprint document this round of work was built from
 requirements.txt         Pinned Python dependencies (langchain/langgraph/libsql-client/webauthn/faster-whisper/python-docx)
 vocalpay.db              Local SQLite database file (dev only — prod uses Turso, see §2b)
-.env                     STRIPE_SECRET_KEY / TURSO_* / GEMINI_API_KEY / WEBAUTHN_* / etc. (local secrets, keep out of git)
+.env                     STRIPE_SECRET_KEY / TURSO_* / OLLAMA_* / WEBAUTHN_* / etc. (local secrets, keep out of git)
 tests/conftest.py        Isolated-DB pytest fixture
 tests/test_vocalpay.py   73 integration tests (payments, contacts, PayID, support chat, BPAY, passkeys, recurring)
 frontend/index.html      Chat UI shell + Setup/Audit tabbed side panel (Tailwind CDN), now with Passkeys + BPAY billers

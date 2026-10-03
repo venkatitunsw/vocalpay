@@ -15,7 +15,6 @@ idna==3.11
 iniconfig==2.3.0
 langchain==1.4.0
 langchain-core==1.6.3
-langchain-google-genai==4.4.0
 langchain-ollama==1.1.0
 langgraph==1.2.11
 libsql-client==0.3.1
