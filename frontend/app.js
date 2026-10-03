@@ -421,6 +421,10 @@ async function handleBpayCommandResponse(res, originalText) {
 // have 2+ trailing words and correctly fall through to the chatbot below).
 const VERB_PLUS_BARE_NAME_RE = /^(pay|send|transfer)\s+([a-zA-Z][a-zA-Z'-]*)\s*$/i;
 const VERB_PLUS_BARE_AMOUNT_RE = /^(pay|send|transfer)\s+(\d+(?:\.\d+)?)\s*$/i;
+// Just the verb, nothing else at all ("pay", "send") -- even more clearly
+// an abandoned payment attempt than the two above, since there's literally
+// nothing else in the message for the chatbot to respond to meaningfully.
+const BARE_VERB_ONLY_RE = /^(pay|send|transfer)\s*$/i;
 
 async function handleCommandResponse(res, originalText) {
   if (!res.ok) {
@@ -437,9 +441,13 @@ async function handleCommandResponse(res, originalText) {
       return;
     }
 
+    const bareVerbMatch = BARE_VERB_ONLY_RE.exec(originalText);
     const bareNameMatch = VERB_PLUS_BARE_NAME_RE.exec(originalText);
     const bareAmountMatch = VERB_PLUS_BARE_AMOUNT_RE.exec(originalText);
-    if (bareNameMatch) {
+    if (bareVerbMatch) {
+      state.pendingSlotFill = null; // both pieces are missing -- nothing specific to chain onto
+      appendErrorBubble(`Who would you like to pay, and how much? Try: "Pay 12 to John".`);
+    } else if (bareNameMatch) {
       state.pendingSlotFill = { type: "missing_amount", target: bareNameMatch[2] };
       appendErrorBubble(
         `How much would you like to pay ${bareNameMatch[2]}? Try: "Pay 12 to ${bareNameMatch[2]}", or just reply with the amount.`
