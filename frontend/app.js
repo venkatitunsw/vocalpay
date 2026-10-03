@@ -19,6 +19,11 @@ const state = {
   // to parse it as an unrelated new command or asking the chatbot. Cleared
   // the moment that card is confirmed, cancelled, or superseded.
   activeDraft: null, // { confirmationId, txnId, amount, currency } | null
+  // Set right after asking "how much?" / "who to?" for an incomplete
+  // payment attempt (see VERB_PLUS_BARE_NAME_RE/VERB_PLUS_BARE_AMOUNT_RE
+  // below) — lets a bare reply like "30" or "alice" complete that specific
+  // question instead of being sent to the chatbot with no context.
+  pendingSlotFill: null, // { type: "missing_amount", target } | { type: "missing_target", amount } | null
 };
 
 const feed = document.getElementById("feed");
@@ -247,6 +252,39 @@ const DRAFT_CORRECTION_RE = /^\s*no+\b|\b(actually|instead|wait|sorry,?\s*i mean
 const DRAFT_LEADING_NO_RE = /^\s*no+,?\s*/i;
 const DRAFT_FILLER_WORDS_RE = /\b(actually|instead|wait|sorry,?\s*i meant|i meant|cancel|stop|nevermind|never mind|forget it|forget that|scratch that|abort)\b/gi;
 
+// A reply that's JUST an amount or JUST a target (name or PayID), nothing
+// else — the natural way to answer "How much would you like to pay alice?"
+// / "Who would you like to send 20 to?" (state.pendingSlotFill, set above).
+const BARE_AMOUNT_ONLY_RE = /^\$?\s*(\d+(?:\.\d+)?)\s*(?:aud|dollars)?$/i;
+const BARE_TARGET_ONLY_RE = /^(?:[a-zA-Z][a-zA-Z'-]*(?:\s+[a-zA-Z][a-zA-Z'-]*){0,2}|\d[\d\s]{6,14}\d)$/;
+
+async function tryResolvePendingSlotFill(text) {
+  const slotFill = state.pendingSlotFill;
+  if (!slotFill) return false;
+  state.pendingSlotFill = null; // consumed either way -- never leave a stale question lying around
+
+  if (DRAFT_CANCEL_RE.test(text) || DRAFT_LEADING_NO_RE.test(text)) {
+    appendAssistantBubble("No worries, cancelled.");
+    return true;
+  }
+
+  let retryText = null;
+  if (slotFill.type === "missing_amount" && BARE_AMOUNT_ONLY_RE.test(text)) {
+    retryText = `Pay ${text.match(BARE_AMOUNT_ONLY_RE)[1]} to ${slotFill.target}`;
+  } else if (slotFill.type === "missing_target" && BARE_TARGET_ONLY_RE.test(text)) {
+    retryText = `Pay ${slotFill.amount} to ${text.trim()}`;
+  }
+
+  if (!retryText) return false; // didn't look like an answer -- treat as a brand-new message instead
+
+  const retryRes = await api("/command/text", {
+    method: "POST",
+    body: { session_id: state.sessionId, text: retryText },
+  });
+  await handleCommandResponse(retryRes, retryText);
+  return true;
+}
+
 async function cancelActiveDraft() {
   const draft = state.activeDraft;
   if (!draft) return { ok: false, error: "No active draft", draft: null };
@@ -283,6 +321,10 @@ composer.addEventListener("submit", async (e) => {
   textInput.disabled = true; // not just the button -- Enter-to-submit can bypass a disabled submit button in some browsers
 
   try {
+    if (!text.endsWith("?") && (await tryResolvePendingSlotFill(text))) {
+      return;
+    }
+
     const draft = state.activeDraft;
     const looksLikeQuestion = text.endsWith("?");
 
@@ -398,15 +440,22 @@ async function handleCommandResponse(res, originalText) {
     const bareNameMatch = VERB_PLUS_BARE_NAME_RE.exec(originalText);
     const bareAmountMatch = VERB_PLUS_BARE_AMOUNT_RE.exec(originalText);
     if (bareNameMatch) {
-      appendErrorBubble(`How much would you like to pay ${bareNameMatch[2]}? Try: "Pay 12 to ${bareNameMatch[2]}".`);
+      state.pendingSlotFill = { type: "missing_amount", target: bareNameMatch[2] };
+      appendErrorBubble(
+        `How much would you like to pay ${bareNameMatch[2]}? Try: "Pay 12 to ${bareNameMatch[2]}", or just reply with the amount.`
+      );
     } else if (bareAmountMatch) {
-      appendErrorBubble(`Who would you like to send ${bareAmountMatch[2]} to? Try: "Pay ${bareAmountMatch[2]} to John".`);
+      state.pendingSlotFill = { type: "missing_target", amount: bareAmountMatch[2] };
+      appendErrorBubble(
+        `Who would you like to send ${bareAmountMatch[2]} to? Try: "Pay ${bareAmountMatch[2]} to John", or just reply with their name.`
+      );
     } else {
       // Didn't parse as a payment command at all, and doesn't look like an
       // incomplete one either — hand it to the support chatbot instead of
       // just showing a raw parser error. It remembers past conversations
       // and can look up real contacts/transactions, but never moves money
       // itself.
+      state.pendingSlotFill = null;
       await askSupportChat(originalText);
     }
     return;
