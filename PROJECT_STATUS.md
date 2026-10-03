@@ -593,7 +593,41 @@ here rather than silently dropped:
 | Invalid/negative amount rejection | **Done** — already enforced (Pydantic `gt=0` + policy `BLOCK`) |
 | Missing-slot clarification UI (BPAY) | **Done** — `/bpay/command`'s `missing` field, surfaced in the chat error bubble |
 | Explicit LangGraph `AgentState` (payment_draft, missing_slots, active_txn_id, dialogue_intent) | **Deferred** — `create_agent()` (§2c) already runs on a LangGraph `StateGraph` internally, but a hand-rolled state machine with these exact fields wasn't built. Reason: the one capability it would add — letting the *same* agent draft and hold a pending payment across turns — conflicts with the deliberate safety boundary (§2c) that the chatbot can never create a transaction. Building it without crossing that boundary would mean a state machine that tracks a draft but still can't act on it, which doesn't earn its complexity. |
-| Conversational interruption (pause a payment draft mid-flow, answer a question, resume) | **Deferred**, for the same reason — this app's payment flow and chatbot are intentionally two separate pipelines (§2c), so there's no single "draft" for an interruption to pause. What already works today: you can message the support chatbot in between a payment's confirmation and execute steps (they're independent HTTP calls) — just not a resumable draft held in one conversational state. |
+| Conversational interruption (pause a payment draft mid-flow, answer a question, resume) | **Partially done** (§8d) — correcting or cancelling a pending confirmation via natural follow-up text now works, without crossing the chatbot/payment safety boundary. Still deferred: a true resumable draft inside one LLM conversation state, for the same reason as the row above. |
+
+## 8d. Correcting or cancelling a payment that's already awaiting confirmation — new
+
+Reported bug: `"Pay 2 to Alice cooper"` opened a confirmation card; typing `"No actually alice wonderland"`
+into the **main chat box** (not the card's own CONFIRM input) fell through to the support chatbot, which
+answered an unrelated question about Alice Wonderland's balance — having no idea a payment was open on
+screen. Root cause: the composer had no memory that a card was still pending, so every message was
+interpreted in isolation as either a brand-new command or a chatbot question.
+
+Fixed without touching the chatbot/payment safety boundary (§2c) — the chatbot still gains zero ability to
+affect a transaction:
+
+- New `POST /confirm/cancel` (`main.py`), mirroring the existing `_expire_confirmation()` helper —
+  user-triggered instead of TTL-triggered. Only ever moves a *pending* confirmation to a terminal
+  `"cancelled"` status (reusing the free-text `status` column, no schema change); cannot approve, create, or
+  reopen anything.
+- `frontend/app.js` tracks `state.activeDraft` — the most recently rendered still-open card (set in
+  `renderConfirmationCard()`, cleared on confirm success) — and, only while one is open, checks a new
+  composer message against simple deterministic regexes (zero LLM involvement) before the existing
+  BPAY/`/command/text`/chatbot routing runs:
+  - Explicit cancel words (`"cancel"`, `"nevermind"`, `"stop"`, ...) → cancel the draft via the new endpoint.
+  - Correction language (a leading `"no"`, `"actually"`, `"instead"`, `"wait"`, `"I meant"`) → cancel the
+    draft, then resubmit `"Pay <same amount> to <stripped target>"` through the *exact* same `/command/text`
+    path everything else uses — the new target still goes through full parsing and the policy engine, so
+    there's no step-up bypass.
+  - A message ending in `"?"`, or one matching neither pattern (a bare name, an unrelated question, or a
+    brand-new `"pay"` command with no correction wording) → completely unaffected, falls through exactly as
+    before. This guards against the obvious false positive: `"I have no idea what you mean"` while a draft is
+    open must not be read as a correction (the leading-`"no"` check is anchored to the *start* of the
+    message specifically to avoid this).
+- 12 scenarios (cancel-only, redirect-by-name, redirect-by-PayID, unrelated question, bare name, a genuine
+  second payment command, a `?`-terminated message, an already-expired/approved confirmation, ...) were
+  written out as a plan and simulated directly against the shipped regex/stripping logic before being
+  considered done.
 
 ## 9. Known gaps / demo shortcuts (not yet productionized)
 
