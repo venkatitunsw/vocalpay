@@ -629,6 +629,51 @@ affect a transaction:
   written out as a plan and simulated directly against the shipped regex/stripping logic before being
   considered done.
 
+## 8e. Chatbot/payment-flow robustness — tester scenario sheet
+
+Reported bug: `"pay alice"` failed to parse (no amount given), carried no `decision`, and the frontend's only
+rule for that shape ("no decision → ask the chatbot") sent it to the local Ollama model, which took >120s and
+was aborted. Prompted a full tester-style review of everything a chatbot like this one could plausibly face —
+written out and verified against the actual code before anything was changed. Full sheet:
+
+**A. Intent parsing / routing**
+
+| # | Scenario | Verdict |
+| --- | --- | --- |
+| A1 | `"pay alice"` (verb + bare name, no amount) | **Fixed** — the reported bug |
+| A2 | `"send 20"` (verb + bare amount, no recipient) | **Fixed** — same class as A1 |
+| A3 | `"pay attention to this"` / `"send me my last transactions"` — idiomatic/informational text that happens to start with a payment verb | Confirmed these fail `intent_parser.py` with the *same* error text as A1/A2 — the fix had to be shape-based (exactly one trailing word), not error-text-based, specifically so these keep reaching the chatbot |
+| A4 | Case/whitespace variance, self-correction, PayID-vs-name targets, no-preposition phrasing, explicit-PayID-qualified names | Already covered by existing parser tests |
+| A5 | Non-English payment phrasing | Accepted limitation — the parser only recognizes English verbs |
+| A6 | Very long chatbot input exceeding the local model's context window (`qwen2.5:7b-instruct` reports `context_length: 4096` tokens via Ollama) | Deferred — no truncation/warning yet, low probability for a chat UI |
+
+**B. Chatbot reliability / resource safety**
+
+| # | Scenario | Verdict |
+| --- | --- | --- |
+| B1 | Local model is slow/hangs | **Fixed** — `OLLAMA_TIMEOUT_SECONDS` (default 90s) bounds the call server-side |
+| B2 | Ollama not running | Already handled — clear connection-error message |
+| B3 | Wrong/unpulled model name | Already handled — clear 404 |
+| B4 | Model too large for available RAM | Already handled — clear `std::bad_alloc`, no crash |
+| B5 | Rapid resubmission while a chatbot reply is pending | **Fixed** — composer's text input is now disabled too, not just the send button |
+| B6 | Several slow/hung chatbot calls exhausting FastAPI's shared sync thread pool | **Fixed** — bounded by the same B1 timeout |
+| B7 | Model answers confidently but wrong despite the right tool being available (a 7B local model following tool-use instructions less reliably than a larger one) | Accepted limitation of self-hosting a small model — not fixable in prompt/code alone |
+| B8 | `chat_messages` table grows unboundedly over time | Deferred — low impact; `_load_history()` already caps what's loaded per-prompt to the last 20 turns |
+
+**C. Payment-flow / state** — all already handled in earlier work: ambiguous-contact CLARIFY picker (§3a),
+correcting/cancelling a pending confirmation (§8d), PIN lockout/expiry/passkey, BPAY missing-slot prompts,
+mid-sentence self-correction, duplicate-name same-vs-different-person resolution.
+
+**D. Security / abuse**
+
+| # | Scenario | Verdict |
+| --- | --- | --- |
+| D1 | SQL injection via free-text input | Already safe — every `*_repo.py` query uses parameterized `?` placeholders |
+| D2 | XSS via a name/note/chatbot reply rendered into the page | Already safe — all dynamic HTML in `frontend/app.js` goes through `escapeHtml()` or `.textContent`, spot-checked every card-rendering function |
+| D3 | Prompt injection trying to convince the chatbot it approved a payment | Already safe by architecture — the chatbot is never given a tool that can create/approve/execute a transaction, a hard boundary at the tool layer, not just a prompt instruction |
+| D4 | No rate limiting on `/support/chat` or `/command/text` | Deferred — acceptable for a single-demo-user app |
+| D5 | No size cap on `/voice/transcribe` audio uploads | Deferred — same reasoning as D4 |
+
 ## 9. Known gaps / demo shortcuts (not yet productionized)
 
 - Single hardcoded `demo-user` — no real auth, login, or multi-user support (frontend has no login screen
