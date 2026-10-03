@@ -261,11 +261,33 @@ const BARE_TARGET_ONLY_RE = /^(?:[a-zA-Z][a-zA-Z'-]*(?:\s+[a-zA-Z][a-zA-Z'-]*){0
 async function tryResolvePendingSlotFill(text) {
   const slotFill = state.pendingSlotFill;
   if (!slotFill) return false;
-  state.pendingSlotFill = null; // consumed either way -- never leave a stale question lying around
+  state.pendingSlotFill = null; // consumed either way, unless a transition branch below re-sets it
 
   if (DRAFT_CANCEL_RE.test(text) || DRAFT_LEADING_NO_RE.test(text)) {
     appendAssistantBubble("No worries, cancelled.");
     return true;
+  }
+
+  if (slotFill.type === "missing_both") {
+    // "pay" alone asked for both pieces at once -- a single bare reply only
+    // ever gives us one of them, so narrow down to the other piece instead
+    // of dropping the context. Specifically avoids ever shipping a bare
+    // name to the chatbot here: it has no tool for "does this contact
+    // exist", so it's prone to confidently claiming a real saved contact
+    // doesn't exist (observed live) instead of just not understanding.
+    if (BARE_AMOUNT_ONLY_RE.test(text)) {
+      const amount = text.match(BARE_AMOUNT_ONLY_RE)[1];
+      state.pendingSlotFill = { type: "missing_target", amount };
+      appendAssistantBubble(`Who would you like to send ${amount} to?`);
+      return true;
+    }
+    if (BARE_TARGET_ONLY_RE.test(text)) {
+      const target = text.trim();
+      state.pendingSlotFill = { type: "missing_amount", target };
+      appendAssistantBubble(`How much would you like to pay ${target}?`);
+      return true;
+    }
+    return false; // not recognizable as either piece -- treat as a new message instead
   }
 
   let retryText = null;
@@ -445,7 +467,7 @@ async function handleCommandResponse(res, originalText) {
     const bareNameMatch = VERB_PLUS_BARE_NAME_RE.exec(originalText);
     const bareAmountMatch = VERB_PLUS_BARE_AMOUNT_RE.exec(originalText);
     if (bareVerbMatch) {
-      state.pendingSlotFill = null; // both pieces are missing -- nothing specific to chain onto
+      state.pendingSlotFill = { type: "missing_both" };
       appendErrorBubble(`Who would you like to pay, and how much? Try: "Pay 12 to John".`);
     } else if (bareNameMatch) {
       state.pendingSlotFill = { type: "missing_amount", target: bareNameMatch[2] };
