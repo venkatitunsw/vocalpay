@@ -12,7 +12,8 @@ NLU_TIMEOUT_SECONDS = float(os.getenv("NLU_TIMEOUT_SECONDS", "60"))
 
 NLU_SYSTEM_PROMPT = (
     "You extract one payment instruction from a user's message for a banking app. "
-    "Return only JSON matching the schema. Use action 'pay' only for a clear request to send money; "
+    "Return only JSON matching the schema. This app only pays in AUD, so set currency to AUD for every "
+    "amount, including casual words like 'bucks' or 'dollars'. Use action 'pay' only for a clear request to send money; "
     "otherwise use 'none'. amount is a positive number in the stated currency, or null if not given. "
     "target is the payee name or PayID digits exactly as written, or null. "
     "If the message is unclear, contradictory, or has two different amounts without a correction, "
