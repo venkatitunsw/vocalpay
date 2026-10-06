@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS payid_directory (
 CREATE TABLE IF NOT EXISTS passkey_credentials (
   credential_id TEXT PRIMARY KEY,       -- base64url credential id from the authenticator
   user_id TEXT NOT NULL,
-  public_key_cbor BLOB NOT NULL,        -- COSE public key, as returned by py_webauthn
+  public_key_cbor BYTEA NOT NULL,       -- COSE public key, as returned by py_webauthn
   sign_count INTEGER NOT NULL DEFAULT 0, -- cloned-authenticator detection: must only increase
   transports_json TEXT,                 -- e.g. '["internal","hybrid"]'
   label TEXT,                           -- user-facing name, e.g. "MacBook Touch ID"

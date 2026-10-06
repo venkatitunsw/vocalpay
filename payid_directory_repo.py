@@ -62,8 +62,8 @@ def seed_payid_directory(count: int = 200) -> None:
             rows.append((digits, _format_display(digits), f"{first} {last}"))
 
         conn.executemany(
-            "INSERT OR IGNORE INTO payid_directory (phone_number, display_number, registered_name) "
-            "VALUES (?, ?, ?)",
+            "INSERT INTO payid_directory (phone_number, display_number, registered_name) "
+            "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
             rows,
         )
         conn.commit()

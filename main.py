@@ -25,7 +25,7 @@ from uuid import uuid4
 from models import PaymentIntentParsed
 from intent_parser import parse_text_command
 
-from db import init_db, DB_PATH
+from db import init_db
 from audit import append_event, load_session_events, verify_session_chain
 
 from users_repo import ensure_demo_user, DEMO_USER_ID
@@ -87,7 +87,7 @@ def on_startup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "db_file": str(DB_PATH)}
+    return {"status": "ok", "database": "postgres"}
 
 class AuditAppendRequest(BaseModel):
     event_type: str

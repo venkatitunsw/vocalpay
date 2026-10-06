@@ -1,8 +1,10 @@
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,16 +12,22 @@ import db as db_module
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
+def client(monkeypatch):
     """
-    Fresh, isolated SQLite DB per test. db.get_conn() reads db.DB_PATH at
-    call time, so monkeypatching the module attribute redirects every repo
-    function without touching their code.
+    Fresh Postgres schema per test. Every get_conn() call sets search_path to
+    this schema, so tables and seeds never leak between tests. The schema is
+    dropped afterwards.
     """
-    db_file = tmp_path / "test_vocalpay.db"
-    monkeypatch.setattr(db_module, "DB_PATH", db_file)
+    schema = f"test_{uuid.uuid4().hex}"
+    with psycopg.connect(db_module.DATABASE_URL, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    monkeypatch.setattr(db_module, "DB_SCHEMA", schema)
 
-    import main  # noqa: PLC0415 (import after DB_PATH patch, before app runs startup)
+    import main  # noqa: PLC0415 (import after DB_SCHEMA patch, before app startup)
 
-    with TestClient(main.app) as c:
-        yield c
+    try:
+        with TestClient(main.app) as c:
+            yield c
+    finally:
+        with psycopg.connect(db_module.DATABASE_URL, autocommit=True) as admin:
+            admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

@@ -53,7 +53,7 @@ def seed_bpay_directory() -> None:
         if existing >= len(_DEMO_BILLERS):
             return
         conn.executemany(
-            "INSERT OR IGNORE INTO bpay_directory (biller_code, biller_name, crn_rule) VALUES (?, ?, ?)",
+            "INSERT INTO bpay_directory (biller_code, biller_name, crn_rule) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
             _DEMO_BILLERS,
         )
         conn.commit()
