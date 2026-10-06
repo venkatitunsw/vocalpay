@@ -1,7 +1,68 @@
 # VocalPay — Project Status
 
-_A text/voice-driven payment assistant: FastAPI + SQLite + Stripe (test mode) backend, with a chat-style
+_A text/voice-driven payment assistant: FastAPI + Postgres + Stripe (test mode) backend, with a chat-style
 web frontend._
+
+## v2 status (current)
+
+**Read this section first.** Sections below that describe SQLite, Turso, Gemini, Qwen, `create_agent`,
+server-side faster-whisper, or the side-panel layout are the v1 build log. Where they conflict with this section,
+this section is correct.
+
+### What changed in v2
+- **Storage:** PostgreSQL via psycopg (`db.py`). Neon in production (`DATABASE_URL`), Docker Postgres 16 locally
+  (`docker-compose.yml`, host port 5433). Turso and SQLite are removed. Tables live in one schema; the per-domain
+  schema split from the plan (`payments`, `directory`, `memory`, `services`, `passkeys`) is not done. Timestamps
+  stay `TEXT`.
+- **Tests:** each test gets its own Postgres schema (`tests/conftest.py`), dropped afterwards.
+- **Chat memory:** a LangGraph `StateGraph` with `PostgresSaver` (`support_chat.py`), keyed by user. The model sees a
+  trimmed window; the full thread is kept. `chat_messages` is gone. Checkpoint tables are created in whatever schema
+  `search_path` resolves to.
+- **Model:** Llama 3.1 8B via Ollama (`llama3.1:8b`). The model is stored on D: (`OLLAMA_MODELS`).
+- **Structured NLU (flag `NLU_LLAMA`, off by default):** Llama proposes `{action, amount, currency, target, note}` as
+  JSON. Pydantic validates it, and the result becomes a canonical sentence for the regex parser. Unsafe or ambiguous
+  output falls back to the regex parser. The model never confirms or executes anything.
+- **Service providers:** five mock providers and open invoices (`services_repo.py`). "pay my Opal top up" resolves
+  to the invoice, and the amount comes from the invoice. Same confirm/PIN steps as other rails. Settlement is simulated.
+- **Rail colours:** P2P emerald, service providers indigo, BPAY amber. Each command response carries `rail`.
+- **Voice:** Whisper base.en runs in the browser (`frontend/voice.js`, transformers.js from jsDelivr). Audio never leaves
+  the device. A speech gate and a filter drop blank-audio tags, music tags and word loops. Browser speech is the
+  fallback. The server `/voice/transcribe` endpoint and faster-whisper are removed.
+- **PayIDs (`payid_validation.py`, `payee_payids_repo.py`):** mobile, email and ABN validation, each with a specific
+  rejection reason. A contact can hold several PayIDs. A PayID belongs to one contact, and a clash names the owner.
+  Pay by saved email PayID. Existing phone numbers are backfilled at startup.
+- **UI:** Setup and Audit are an overlay drawer. Focus moves in on open and back on close. Escape closes it. Each
+  contact lists and adds PayIDs. A "Screen reader announcements" setting controls the live region on the feed. After a
+  reply, focus goes to the waiting confirmation field.
+
+### Verified (not just unit-tested)
+- Real Chromium driven by Playwright:
+  - rail card colours for P2P, service and BPAY
+  - service bill confirm, pay and mark-paid
+  - keyboard-only P2P payment: Tab to Pay now, Enter, settled in Stripe test mode with receiver evidence
+  - drawer open, focus and Escape; PayID add and clash message; SR setting persistence
+- Whisper in Chromium with synthesised speech: clean speech, speech over synthetic fan noise, a blocked model
+  falling back to browser speech, and the download progress line.
+- Llama 3.1 live: free-phrased payments map to valid canonical sentences, and "for <reason>" notes are kept.
+- Test suite: 90 passing against Postgres.
+
+### Not done (planned in v2, deferred)
+- Spoken output (`speechSynthesis`), private mode with tap-to-reveal, auto-lock, high-contrast and text-size options.
+- Real NVDA or VoiceOver testing and an automated axe check.
+- Email PayID lookup in the external directory (saved contacts only).
+- Per-domain Postgres schemas.
+- Neon database and the Render deploy have not been provisioned or verified.
+
+### Known limitations
+- Whisper base.en takes about 10 s per page load to initialise on this CPU, plus the one-time ~17 s download.
+  Synthetic noise is not a real room.
+- Llama on CPU is slow. Chat turns can exceed the 120 s frontend limit.
+- The browser speech fallback is verified only up to starting recognition; live recognition is untested here.
+
+---
+
+## v1 build log (historical)
+
 
 ## 1. What it is
 

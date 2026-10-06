@@ -3,8 +3,10 @@
 A natural-language payment assistant: tell it "Pay 12 to John for dinner" (or speak it), and it parses the
 intent, runs it through a risk/policy engine, requires the right confirmation (typed phrase or PIN), and
 executes the payment through Stripe's test API — with every step written to a tamper-evident, hash-chained
-audit log. It also includes a LangChain + Gemini support chatbot that remembers your conversation and can
-answer questions about your contacts, transactions, and account — without ever being able to move money itself.
+audit log. It also includes a LangGraph support chatbot on a self-hosted Llama 3.1 model (via Ollama) that
+remembers each user's conversation in Postgres and can answer questions about contacts, transactions, and
+receiver balances — without ever being able to move money itself. Voice input runs in the browser (Whisper), so
+audio never leaves the device.
 
 **Live demo:** https://vocalpay.onrender.com
 
@@ -29,8 +31,9 @@ answer questions about your contacts, transactions, and account — without ever
 
 ## Tech stack
 
-FastAPI + raw `sqlite3`/Turso (libSQL) · Stripe SDK (test mode, Connect) · LangChain + Google Gemini ·
-vanilla HTML/CSS/JS frontend (Tailwind via CDN, no build step) · pytest
+FastAPI + PostgreSQL (psycopg; Neon in production, Docker locally) · Stripe SDK (test mode, Connect) ·
+LangGraph + Llama 3.1 via Ollama · Whisper (transformers.js, in-browser) · vanilla HTML/CSS/JS frontend
+(Tailwind via CDN, no build step) · pytest
 
 ## Running it locally
 
@@ -39,16 +42,17 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows; use `source .venv/bin/activate` on macOS/Linux
 pip install -r requirements.txt
 
+docker compose up -d            # local Postgres 16 on port 5433 (needs Docker Desktop)
 cp .env.example .env            # then fill in STRIPE_SECRET_KEY at minimum
 uvicorn main:app --reload
 ```
 
 Open **http://127.0.0.1:8000** — FastAPI serves both the API and the chat frontend from the same origin.
 
-Only `STRIPE_SECRET_KEY` (a Stripe **test-mode** key from https://dashboard.stripe.com/test/apikeys) is
-required to run payments. `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` and `GEMINI_API_KEY` are optional — without
-them, the app falls back to a local SQLite file and the support chatbot returns a clear "not configured"
-error instead of the rest of the app breaking. See [.env.example](.env.example) for all four.
+Required: `STRIPE_SECRET_KEY` (a Stripe **test-mode** key from https://dashboard.stripe.com/test/apikeys) and a
+`DATABASE_URL` (the default in `db.py` matches the compose file). The support chatbot needs Ollama running at
+`OLLAMA_BASE_URL` with `ollama pull llama3.1:8b`; without it, `/support/chat` returns a clear connection error
+and payments are unaffected. See [.env.example](.env.example).
 
 The demo account (`demo-user`, PIN `1234`) is seeded automatically on first run — no signup/login exists.
 
@@ -58,14 +62,17 @@ The demo account (`demo-user`, PIN `1234`) is seeded automatically on first run 
 pytest
 ```
 
-46 integration tests covering the payment pipeline, PIN lockout/expiry, audit tamper-detection, PayID
-resolution, duplicate-contact-name handling, and the support chatbot (LLM calls mocked, no API key needed).
+90 tests run against a real Postgres: each test gets its own throwaway schema. They cover the payment
+pipeline, PIN lockout/expiry, audit tamper-detection, PayID validation and ownership, duplicate-contact-name
+handling, service-provider and BPAY flows, the chatbot's memory across a graph restart, and NLU fallbacks.
+Llama and Stripe calls are mocked where the tests need them, so no model or key is required for `pytest`.
 
 ## Deploying
 
 Configured for [Render](https://render.com) via [render.yaml](render.yaml) — a free web service that builds
-straight from this repo. See [PROJECT_STATUS.md](PROJECT_STATUS.md) §2b/§2c for how production persistence
-(Turso) and the chatbot's API key are wired up as environment variables.
+straight from this repo. Production data lives in a Neon Postgres database, set as `DATABASE_URL` in the Render
+dashboard. The chatbot needs a reachable Ollama server (`OLLAMA_BASE_URL`); the free Render instance can't run
+the model itself.
 
 ## Docs
 
