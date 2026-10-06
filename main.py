@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from models import PaymentIntentParsed
 from intent_parser import parse_text_command
+from nlu_llama import NLU_LLAMA_ENABLED, llm_canonical_command
 
 from db import init_db
 from audit import append_event, load_session_events, verify_session_chain
@@ -156,8 +157,14 @@ def command_text(req: TextCommandRequest):
     # 1) log raw command
     append_event(req.session_id, "COMMAND_TEXT_RECEIVED", {"text": req.text})
 
-    # 2) parse
-    result = parse_text_command(req.text)
+    # 2) parse: Llama proposes a canonical sentence when enabled; the regex parser is the fallback
+    parse_input = req.text
+    if NLU_LLAMA_ENABLED:
+        canonical = llm_canonical_command(req.text)
+        if canonical:
+            append_event(req.session_id, "NLU_CANONICAL", {"sentence": canonical})
+            parse_input = canonical
+    result = parse_text_command(parse_input)
 
     if not result.ok:
         append_event(req.session_id, "INTENT_PARSE_FAILED", {"error": result.error})

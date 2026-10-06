@@ -1401,3 +1401,59 @@ def test_confirm_passkey_rejects_stale_sign_count_as_cloned(client, monkeypatch)
     body = r.json()
     assert body["ok"] is False
     assert "cloned" in body["error"]
+
+
+# --- Llama structured NLU: proposes parameters, deterministic code validates ---
+
+def test_nlu_valid_json_becomes_canonical_pay_sentence():
+    from nlu_llama import llm_canonical_command
+    reply = '{"action": "pay", "amount": 30, "currency": "AUD", "target": "Alice", "note": "lunch", "ambiguities": []}'
+    assert llm_canonical_command("send alice thirty bucks for lunch", invoke=lambda _t: reply) == "Pay 30.00 to Alice for lunch"
+
+
+def test_nlu_invalid_json_retries_then_falls_back_to_none():
+    from nlu_llama import llm_canonical_command
+    calls = []
+
+    def bad(_t):
+        calls.append(1)
+        return "not json at all"
+
+    assert llm_canonical_command("pay alice", invoke=bad) is None
+    assert len(calls) == 2
+
+
+def test_nlu_model_error_falls_back_to_none():
+    from nlu_llama import llm_canonical_command
+
+    def boom(_t):
+        raise ConnectionError("ollama down")
+
+    assert llm_canonical_command("pay alice 5", invoke=boom) is None
+
+
+def test_nlu_refuses_unsafe_intents():
+    from nlu_llama import llm_canonical_command
+    cases = [
+        '{"action": "none", "amount": 5, "target": "Bob"}',
+        '{"action": "pay", "amount": null, "target": "Bob"}',
+        '{"action": "pay", "amount": 0, "target": "Bob"}',
+        '{"action": "pay", "amount": 5, "currency": "USD", "target": "Bob"}',
+        '{"action": "pay", "amount": 5, "target": null}',
+        '{"action": "pay", "amount": 5, "target": "Bob", "ambiguities": ["two amounts"]}',
+    ]
+    for reply in cases:
+        assert llm_canonical_command("x", invoke=lambda _t, r=reply: r) is None, reply
+
+
+def test_command_text_uses_llama_canonical_when_flag_on(client, monkeypatch):
+    import main as main_module
+
+    monkeypatch.setattr(main_module, "NLU_LLAMA_ENABLED", True)
+    monkeypatch.setattr(main_module, "llm_canonical_command", lambda text: "Pay 12.00 to John")
+    session_id = client.post("/session/new").json()["session_id"]
+    r = client.post("/command/text", json={"session_id": session_id, "text": "shoot john a dozen bucks"})
+    body = r.json()
+    assert body["intent"]["amount"] == 12.0
+    assert body["intent"]["payee_name"] == "John"
+    assert body["decision"]["decision"] == "BLOCK"

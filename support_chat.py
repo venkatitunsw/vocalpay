@@ -21,7 +21,7 @@ from stripe_service import get_account_balance
 # OLLAMA_BASE_URL; no API key involved.
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 # Bounds how long a single Ollama call can run server-side. /support/chat
 # runs as a plain sync endpoint (FastAPI's sync thread pool), so a hung call
 # without this would tie up a worker thread indefinitely -- enough of those
