@@ -71,9 +71,7 @@ def _build_model():
 
 def _checkpointer():
     global _saver_conn
-    kwargs = {"autocommit": True, "row_factory": dict_row}
-    if db.DB_SCHEMA:
-        kwargs["options"] = f"-c search_path={db.DB_SCHEMA}"
+    kwargs = {"autocommit": True, "row_factory": dict_row, "options": f"-c search_path={db.domain_schema('memory')}"}
     _saver_conn = psycopg.connect(db.DATABASE_URL, **kwargs)
     saver = PostgresSaver(_saver_conn)
     saver.setup()

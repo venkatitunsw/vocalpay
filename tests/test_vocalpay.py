@@ -795,12 +795,12 @@ def test_pay_by_payid_matches_own_contact(client, monkeypatch):
     assert "PayID: 0400 555 111" in body["read_back"]
 
 
-def _insert_directory_entry(phone_number="0412345678", display_number="0412 345 678", registered_name="Priya Kapoor"):
+def _insert_directory_entry(phone_number="0412345678", display_number="0412 345 678", registered_name="Priya Kapoor", email=None):
     conn = db_module.get_conn()
     try:
         conn.execute(
-            "INSERT INTO payid_directory (phone_number, display_number, registered_name) VALUES (?, ?, ?)",
-            (phone_number, display_number, registered_name),
+            "INSERT INTO payid_directory (phone_number, display_number, registered_name, email) VALUES (?, ?, ?, ?)",
+            (phone_number, display_number, registered_name, email),
         )
         conn.commit()
     finally:
@@ -1523,4 +1523,49 @@ def test_pay_by_unknown_email_is_blocked_with_clear_reason(client):
     session_id = _new_session(client)
     body = client.post("/command/text", json={"session_id": session_id, "text": "Pay 5 to nobody@x.com"}).json()
     assert body["ok"] is False
-    assert "No saved contact has that email PayID" in body["decision"]["reason"]
+    assert "not a registered PayID" in body["decision"]["reason"]
+
+
+def test_pay_by_registered_directory_email_auto_provisions(client, monkeypatch):
+    monkeypatch.setattr(main, "create_test_connected_account", lambda display_name: "acct_priya_email")
+    _insert_directory_entry(email="priya@example.com")
+    _add_default_payment_method(client)
+
+    session_id = _new_session(client)
+    body = client.post("/command/text", json={"session_id": session_id, "text": "Pay 5 to priya@example.com"}).json()
+    assert body["ok"] is True
+    assert body["intent"]["payee_name"] == "Priya Kapoor"
+    assert body["decision"]["decision"] == "PROCEED"
+    assert body["payee"]["is_saved_contact"] is False
+
+
+def test_pay_by_unregistered_email_is_blocked(client):
+    session_id = _new_session(client)
+    body = client.post("/command/text", json={"session_id": session_id, "text": "Pay 5 to nobody@nowhere.com"}).json()
+    assert body["ok"] is False
+    assert "not a registered PayID" in body["decision"]["reason"]
+
+
+def test_directory_entries_all_have_an_email(client):
+    conn = db_module.get_conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM payid_directory WHERE email IS NOT NULL").fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 200
+
+
+def test_tables_live_in_their_domain_schemas(client):
+    conn = db_module.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema LIKE ? AND table_type='BASE TABLE'",
+            (f"{db_module.DB_SCHEMA}_%",),
+        ).fetchall()
+    finally:
+        conn.close()
+    placed = {r["table_name"]: r["table_schema"] for r in rows}
+    assert placed["payees"] == f"{db_module.DB_SCHEMA}_payments"
+    assert placed["payid_directory"] == f"{db_module.DB_SCHEMA}_directory"
+    assert placed["service_invoices"] == f"{db_module.DB_SCHEMA}_services"
+    assert placed["passkey_credentials"] == f"{db_module.DB_SCHEMA}_passkeys"

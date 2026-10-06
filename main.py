@@ -39,7 +39,7 @@ from payees_repo import (
     find_saved_contact_by_nickname,
     get_payee,
 )
-from payid_directory_repo import looks_like_payid, lookup_payid, seed_payid_directory, normalize_payid
+from payid_directory_repo import looks_like_payid, lookup_payid, lookup_payid_email, seed_payid_directory, normalize_payid
 
 from transactions_repo import (
     create_pending_transaction,
@@ -156,6 +156,55 @@ class TextCommandRequest(BaseModel):
     session_id: str
     text: str
 
+def _blocked_response(session_id: str, intent, reason: str) -> dict:
+    decision_info = {"decision": "BLOCK", "reason": reason, "required_confirmation": "none", "risk_level": "high"}
+    append_event(session_id, "DECISION", decision_info)
+    return {"ok": False, "intent": intent.model_dump(), "payee_exists": False, "decision": decision_info}
+
+
+def _provision_directory_payee(session_id: str, intent, directory_match: dict, payid_values: list[str]):
+    """Creates a receiver account for a registered directory entry. Returns (payee_record, None) or (None, blocked)."""
+    try:
+        connected_account_id = create_test_connected_account(directory_match["registered_name"])
+    except stripe.error.StripeError as e:
+        append_event(session_id, "PAYID_PROVISION_FAILED", {"phone_number": directory_match["display_number"], "error": str(e)})
+        blocked = _blocked_response(
+            session_id, intent, "Could not set up this PayID's receiving account. Please try again shortly.",
+        )
+        return None, blocked
+
+    new_payee_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO payees
+            (payee_id, user_id, nickname, type, identifier, phone_number, stripe_connected_account_id, is_contact, created_at)
+            VALUES (?, ?, ?, 'stripe', ?, ?, ?, 0, ?)
+            """,
+            (
+                new_payee_id, DEMO_USER_ID, directory_match["registered_name"],
+                directory_match["display_number"], directory_match["display_number"],
+                connected_account_id, now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    for value in payid_values:
+        add_payid(DEMO_USER_ID, new_payee_id, value)
+    payee_record = get_payee(new_payee_id)
+    append_event(session_id, "PAYID_AUTO_PROVISIONED", {
+        "payee_id": new_payee_id,
+        "phone_number": directory_match["display_number"],
+        "registered_name": directory_match["registered_name"],
+        "stripe_connected_account_id": connected_account_id,
+    })
+    return payee_record, None
+
+
 @app.post("/command/text")
 def command_text(req: TextCommandRequest):
     # 1) log raw command
@@ -184,91 +233,47 @@ def command_text(req: TextCommandRequest):
     exists = False
 
     if "@" in intent.payee_name:
-        payee_record = find_payee_by_payid_value(DEMO_USER_ID, intent.payee_name.strip().lower())
-        if payee_record is None:
-            return {
-                "ok": False,
-                "rail": "payid",
-                "decision": {"decision": "BLOCK", "reason": "No saved contact has that email PayID. Add it to a contact in Setup first.",
-                             "required_confirmation": "none", "risk_level": "high"},
-            }
-        exists = True
+        payid_raw = intent.payee_name.strip().lower()
+        payee_record = find_payee_by_payid_value(DEMO_USER_ID, payid_raw)
+        exists = payee_record is not None
+        if not payee_record:
+            directory_match = lookup_payid_email(payid_raw)
+            append_event(req.session_id, "PAYEE_LOOKUP", {
+                "payee_name": payid_raw, "exists": False, "by": "email", "directory_match": directory_match,
+            })
+            if not directory_match:
+                return _blocked_response(req.session_id, intent, f'"{payid_raw}" is not a registered PayID.')
+            payee_record, blocked = _provision_directory_payee(
+                req.session_id, intent, directory_match, [directory_match["email"], directory_match["display_number"]],
+            )
+            if blocked:
+                return blocked
+            exists = True
         intent.payee_name = payee_record["nickname"]
         append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "email"})
     elif looks_like_payid(intent.payee_name):
         # The user typed a number, not a name — resolve it as a PayID rather
-        # than a nickname. Real-world PayID networks (and things like Zelle)
-        # let you pay any *registered* PayID immediately — saving the person
-        # as a contact is a convenience for next time, never a precondition
-        # to pay them. So: check the user's own contacts first (by phone,
-        # regardless of formatting); if that misses, check the external
-        # PayID directory and, if it's a real registered number, provision a
-        # receiver account for it on the spot so the payment can proceed and
-        # still be trackable — without forcing a "save contact" step.
+        # than a nickname. Real-world PayID networks let you pay any *registered*
+        # PayID immediately; saving the person as a contact is a convenience,
+        # never a precondition. So: saved contacts first (by phone, regardless of
+        # formatting), then the external directory, provisioning a receiver
+        # account on the spot so the payment is still trackable.
         payid_raw = intent.payee_name
         payee_record = find_payee_by_phone(DEMO_USER_ID, payid_raw)
         exists = payee_record is not None
-
         if not payee_record:
             directory_match = lookup_payid(payid_raw)
             append_event(req.session_id, "PAYEE_LOOKUP", {
                 "payee_name": payid_raw, "exists": False, "by": "payid", "directory_match": directory_match,
             })
-
             if not directory_match:
-                reason = f"\"{payid_raw}\" is not a valid, registered PayID."
-                decision_info = {"decision": "BLOCK", "reason": reason, "required_confirmation": "none", "risk_level": "high"}
-                append_event(req.session_id, "DECISION", decision_info)
-                return {
-                    "ok": False,
-                    "intent": intent.model_dump(),
-                    "payee_exists": False,
-                    "decision": decision_info,
-                }
-
-            try:
-                connected_account_id = create_test_connected_account(directory_match["registered_name"])
-            except stripe.error.StripeError as e:
-                reason = "Could not set up this PayID's receiving account. Please try again shortly."
-                decision_info = {"decision": "BLOCK", "reason": reason, "required_confirmation": "none", "risk_level": "high"}
-                append_event(req.session_id, "PAYID_PROVISION_FAILED", {"phone_number": payid_raw, "error": str(e)})
-                append_event(req.session_id, "DECISION", decision_info)
-                return {
-                    "ok": False,
-                    "intent": intent.model_dump(),
-                    "payee_exists": False,
-                    "decision": decision_info,
-                }
-
-            new_payee_id = str(uuid4())
-            now = datetime.now(timezone.utc).isoformat()
-            conn = get_conn()
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO payees
-                    (payee_id, user_id, nickname, type, identifier, phone_number, stripe_connected_account_id, is_contact, created_at)
-                    VALUES (?, ?, ?, 'stripe', ?, ?, ?, 0, ?)
-                    """,
-                    (
-                        new_payee_id, DEMO_USER_ID, directory_match["registered_name"],
-                        directory_match["display_number"], directory_match["display_number"],
-                        connected_account_id, now,
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-            add_payid(DEMO_USER_ID, new_payee_id, directory_match["display_number"])
-            payee_record = get_payee(new_payee_id)
+                return _blocked_response(req.session_id, intent, f'"{payid_raw}" is not a valid, registered PayID.')
+            payee_record, blocked = _provision_directory_payee(
+                req.session_id, intent, directory_match, [directory_match["display_number"]],
+            )
+            if blocked:
+                return blocked
             exists = True
-            append_event(req.session_id, "PAYID_AUTO_PROVISIONED", {
-                "payee_id": new_payee_id,
-                "phone_number": directory_match["display_number"],
-                "registered_name": directory_match["registered_name"],
-                "stripe_connected_account_id": connected_account_id,
-            })
 
         intent.payee_name = payee_record["nickname"]
         append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "payid"})

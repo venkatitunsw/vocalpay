@@ -91,7 +91,7 @@
     }
   }
 
-  function create({ micBtn, micStatus, textInput, onState }) {
+  function create({ micBtn, micStatus, textInput, onState, onResult }) {
     const webSpeechImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
     const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
     let whisperFailed = false;
@@ -109,6 +109,7 @@
     function fill(text) {
       textInput.value = text;
       textInput.focus();
+      if (onResult) onResult();
     }
 
     function useWebSpeech() {

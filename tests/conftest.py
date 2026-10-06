@@ -21,7 +21,8 @@ def client(monkeypatch):
     """
     schema = f"test_{uuid.uuid4().hex}"
     with psycopg.connect(db_module.DATABASE_URL, autocommit=True) as admin:
-        admin.execute(f'CREATE SCHEMA "{schema}"')
+        for domain in db_module.DOMAIN_TABLES:
+            admin.execute(f'CREATE SCHEMA "{schema}_{domain}"')
     monkeypatch.setattr(db_module, "DB_SCHEMA", schema)
 
     import main  # noqa: PLC0415 (import after DB_SCHEMA patch, before app startup)
@@ -32,4 +33,5 @@ def client(monkeypatch):
     finally:
         support_chat.reset_graph()
         with psycopg.connect(db_module.DATABASE_URL, autocommit=True) as admin:
-            admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            for domain in db_module.DOMAIN_TABLES:
+                admin.execute(f'DROP SCHEMA IF EXISTS "{schema}_{domain}" CASCADE')

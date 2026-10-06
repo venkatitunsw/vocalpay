@@ -12,14 +12,50 @@ DATABASE_URL = os.getenv(
     "postgresql://vocalpay:vocalpay@localhost:5433/vocalpay",  # docker-compose.yml
 )
 
-# Tests point this at a throwaway schema per test; None means the default search_path.
+# Tests set this to a unique prefix per test so every domain schema is throwaway.
+# None means production names: payments, directory, services, passkeys, memory.
 DB_SCHEMA = None
 
+DOMAIN_TABLES = {
+    "payments": [
+        "users", "payees", "payee_payids", "payment_methods", "transactions", "audit_events",
+        "confirmations", "saved_bpay_billers", "recurring_schedules",
+    ],
+    "directory": ["payid_directory", "bpay_directory"],
+    "services": ["service_providers", "service_invoices"],
+    "passkeys": ["passkey_credentials"],
+    "memory": [],  # LangGraph's PostgresSaver creates its own tables here
+}
+TABLE_DOMAIN = {table: domain for domain, tables in DOMAIN_TABLES.items() for table in tables}
+
+_CREATE_TABLE_RE = re.compile(r"CREATE TABLE IF NOT EXISTS (\w+)")
+_CREATE_INDEX_RE = re.compile(r"(CREATE INDEX IF NOT EXISTS \w+ ON )(\w+)(\s*\()")
 _QMARK_PARAM = re.compile(r"\?(?=(?:[^']*'[^']*')*[^']*$)")
+
+
+def domain_schema(domain: str) -> str:
+    return f"{DB_SCHEMA}_{domain}" if DB_SCHEMA else domain
+
+
+def search_path() -> str:
+    return ",".join([domain_schema(d) for d in DOMAIN_TABLES] + ["public"])
 
 
 def _to_pg_sql(sql: str) -> str:
     return _QMARK_PARAM.sub("%s", sql)
+
+
+def _qualify_ddl(sql: str) -> str:
+    def create_table(m):
+        table = m.group(1)
+        return f"CREATE TABLE IF NOT EXISTS {domain_schema(TABLE_DOMAIN[table])}.{table}"
+
+    def create_index(m):
+        table = m.group(2)
+        return f"{m.group(1)}{domain_schema(TABLE_DOMAIN[table])}.{table}{m.group(3)}"
+
+    sql = _CREATE_TABLE_RE.sub(create_table, sql)
+    return _CREATE_INDEX_RE.sub(create_index, sql)
 
 
 class _Conn:
@@ -50,10 +86,7 @@ class _Conn:
 
 
 def get_conn():
-    kwargs = {"row_factory": dict_row}
-    if DB_SCHEMA:
-        kwargs["options"] = f"-c search_path={DB_SCHEMA}"
-    return _Conn(psycopg.connect(DATABASE_URL, **kwargs))
+    return _Conn(psycopg.connect(DATABASE_URL, row_factory=dict_row, options=f"-c search_path={search_path()}"))
 
 
 _MIGRATIONS = {
@@ -75,6 +108,9 @@ _MIGRATIONS = {
     "confirmations": {
         "challenge": "TEXT",
     },
+    "payid_directory": {
+        "email": "TEXT",
+    },
 }
 
 
@@ -90,6 +126,16 @@ def _run_migrations(conn) -> None:
     )
 
 
+def _move_legacy_public_tables(conn) -> None:
+    """Databases created before domain schemas existed keep their tables in public; move them, data intact."""
+    for table, domain in TABLE_DOMAIN.items():
+        if conn.execute("SELECT to_regclass(%s) AS t", (f"public.{table}",)).fetchone()["t"] is None:
+            continue
+        if conn.execute("SELECT to_regclass(%s) AS t", (f"{domain_schema(domain)}.{table}",)).fetchone()["t"] is not None:
+            continue
+        conn.execute(f"ALTER TABLE public.{table} SET SCHEMA {domain_schema(domain)}")
+
+
 def init_db() -> None:
     if not SCHEMA_PATH.exists():
         raise FileNotFoundError(f"Missing schema file: {SCHEMA_PATH}")
@@ -98,7 +144,11 @@ def init_db() -> None:
 
     conn = get_conn()
     try:
-        conn.executescript(schema_sql)
+        for domain in DOMAIN_TABLES:
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{domain_schema(domain)}"')
+        if DB_SCHEMA is None:
+            _move_legacy_public_tables(conn)
+        conn.executescript(_qualify_ddl(schema_sql))
         _run_migrations(conn)
         conn.commit()
     finally:

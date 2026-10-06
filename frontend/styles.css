@@ -40,3 +40,24 @@ textarea#text-input { field-sizing: content; max-height: 140px; }
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Private mode: values stay in the layout (so the page doesn't shift) but are blurred until revealed. */
+.sens { border-radius: 4px; transition: filter .15s; }
+body.private .sens:not(.revealed) {
+  filter: blur(6px);
+  user-select: none;
+  cursor: pointer;
+  background: rgba(148, 163, 184, .18);
+}
+body.private .sens:not(.revealed):focus-visible { outline: 2px solid #10b981; outline-offset: 2px; }
+body.locked .sens { filter: blur(6px) !important; }
+
+/* High contrast: pure black and white, with brighter text and visible borders. */
+html.hc, html.hc body { background: #000 !important; color: #fff !important; }
+html.hc [class*="bg-slate-9"], html.hc [class*="bg-slate-8"], html.hc [class*="bg-slate-5"] { background-color: #000 !important; }
+html.hc [class*="text-slate-"], html.hc [class*="text-emerald-"], html.hc [class*="text-rose-"],
+html.hc [class*="text-amber-"], html.hc [class*="text-indigo-"], html.hc [class*="text-sky-"] { color: #fff !important; }
+html.hc [class*="border-"] { border-color: #fff !important; }
+html.hc button, html.hc input, html.hc textarea, html.hc select { border: 1px solid #fff !important; }
+html.hc [class*="bg-emerald-500"] { background-color: #6ee7b7 !important; color: #000 !important; }
+html.hc .sens:not(.revealed) { background: #333 !important; }

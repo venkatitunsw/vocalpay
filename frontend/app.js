@@ -82,19 +82,21 @@ function appendUserBubble(text) {
   el.className = "flex justify-end";
   el.innerHTML = `
     <div class="max-w-[80%] bg-emerald-500 text-slate-950 rounded-2xl rounded-br-sm px-4 py-2.5 text-sm font-medium">
-      ${escapeHtml(text)}
+      ${VocalPrivacy.sens(escapeHtml(text))}
     </div>`;
   feed.appendChild(el);
   scrollToBottom();
 }
 
-function appendAssistantBubble(text) {
+function appendAssistantBubble(text, opts = {}) {
   const el = document.createElement("div");
   el.className = "flex justify-start";
+  const body = opts.sensitive ? VocalPrivacy.sens(escapeHtml(text)) : escapeHtml(text);
   el.innerHTML = `
     <div class="max-w-[80%] bg-slate-800 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm">
-      ${escapeHtml(text)}
+      ${body}
     </div>`;
+  VocalPrivacy.speak(text);
   feed.appendChild(el);
   scrollToBottom();
   return el;
@@ -107,6 +109,7 @@ function appendErrorBubble(text) {
     <div class="max-w-[80%] bg-rose-950 border border-rose-800 text-rose-200 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm">
       ${escapeHtml(text)}
     </div>`;
+  VocalPrivacy.speak(text);
   feed.appendChild(el);
   scrollToBottom();
   return el;
@@ -132,7 +135,7 @@ function escapeHtml(str) {
 }
 
 function money(amount, currency) {
-  return `${currency} ${Number(amount).toFixed(2)}`;
+  return VocalPrivacy.sens(`${currency} ${Number(amount).toFixed(2)}`);
 }
 
 // --- WebAuthn/passkey helpers --------------------------------------------------
@@ -326,7 +329,7 @@ function markDraftCardCancelled(cardEl, message) {
   if (!cardEl) return;
   const form = cardEl.querySelector(".pin-form, .normal-form");
   const notice = document.createElement("div");
-  notice.className = "text-slate-500 text-xs font-medium";
+  notice.className = "text-slate-400 text-xs font-medium";
   notice.textContent = message;
   if (form) form.replaceWith(notice);
   cardEl.querySelectorAll(".use-passkey-btn, .feedback, .save-contact-row").forEach((el) => el.remove());
@@ -437,7 +440,7 @@ const RAIL_STYLE = {
 };
 
 async function handleServiceCommandResponse(res) {
-  appendAssistantBubble(res.read_back);
+  appendAssistantBubble(res.read_back, { sensitive: true });
   renderConfirmationCard(
     {
       intent: { amount: res.invoice.amount_cents / 100, currency: res.invoice.currency, payee_name: res.invoice.provider_name, note: null },
@@ -464,7 +467,7 @@ async function handleBpayCommandResponse(res, originalText) {
     }
     return;
   }
-  appendAssistantBubble(res.read_back);
+  appendAssistantBubble(res.read_back, { sensitive: true });
   renderConfirmationCard(
     {
       intent: { amount: res.parsed.amount, currency: "AUD", payee_name: res.biller.biller_name, note: null },
@@ -533,7 +536,7 @@ async function handleCommandResponse(res, originalText) {
     return;
   }
 
-  appendAssistantBubble(res.read_back);
+  appendAssistantBubble(res.read_back, { sensitive: true });
   renderConfirmationCard(res);
 }
 
@@ -549,7 +552,7 @@ function renderClarifyPickerCard(res) {
           (c, i) => `
         <button type="button" class="clarify-pick-btn text-left bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm transition" data-idx="${i}">
           <div class="font-medium">${escapeHtml(c.nickname)}</div>
-          ${c.phone_number ? `<div class="text-[11px] text-slate-500 font-mono">PayID: ${escapeHtml(c.phone_number)}</div>` : ""}
+          ${c.phone_number ? `<div class="text-[11px] text-slate-400 font-mono">PayID: ${escapeHtml(c.phone_number)}</div>` : ""}
         </button>`
         )
         .join("")}
@@ -637,7 +640,7 @@ function renderConfirmationCard(cmdRes, opts = {}) {
         ${required === "pin" ? "PIN required" : "Type CONFIRM"}
       </span>
     </div>
-    <div class="text-lg font-semibold">${money(intent.amount, intent.currency)} → ${escapeHtml(intent.payee_name)}</div>
+    <div class="text-lg font-semibold">${money(intent.amount, intent.currency)} → ${VocalPrivacy.sens(escapeHtml(intent.payee_name))}</div>
     ${payee && payee.phone_number ? `<div class="text-xs text-slate-400 font-mono">PayID: ${escapeHtml(payee.phone_number)}</div>` : ""}
     ${intent.note ? `<div class="text-xs text-slate-400">"${escapeHtml(intent.note)}"</div>` : ""}
     ${
@@ -874,15 +877,15 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-1">
           <div class="text-emerald-300 font-medium">${railLabel} payment ${escapeHtml(res.final_status)}</div>
-          <div class="text-[11px] text-emerald-500/80 font-mono">${escapeHtml(res.simulated_reference)}</div>
-          <div class="text-[10px] text-slate-500">${escapeHtml(res.note)}</div>
+          <div class="text-[11px] text-emerald-300 font-mono">${escapeHtml(res.simulated_reference)}</div>
+          <div class="text-[10px] text-slate-400">${escapeHtml(res.note)}</div>
         </div>`;
     } else if (res.ok) {
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-2">
           <div>
             <div class="text-emerald-300 font-medium">Payment ${escapeHtml(res.final_status)}</div>
-            <div class="text-[11px] text-emerald-500/80 font-mono mt-0.5">${escapeHtml(res.stripe_payment_intent_id)}</div>
+            <div class="text-[11px] text-emerald-300 font-mono mt-0.5">${escapeHtml(res.stripe_payment_intent_id)}</div>
           </div>
           ${renderReceiverEvidence(res.receiver_evidence)}
         </div>`;
@@ -902,7 +905,7 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
 
 function renderReceiverEvidence(ev) {
   if (!ev) {
-    return `<div class="text-[11px] text-slate-500 border-t border-emerald-900 pt-2">
+    return `<div class="text-[11px] text-slate-400 border-t border-emerald-900 pt-2">
       No receiver tracking for this payee — this only proves the card was charged, not that a specific
       person received it. Add them as a contact in Setup to get receiver evidence.
     </div>`;
@@ -915,10 +918,10 @@ function renderReceiverEvidence(ev) {
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-3.5 w-3.5"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>
           Received by ${escapeHtml(ev.payee_nickname)}
         </div>
-        <div class="text-[11px] text-emerald-500/80 mt-1">
+        <div class="text-[11px] text-emerald-300 mt-1">
           ${amount} now in their Stripe balance (their account, not the platform's).
         </div>
-        <div class="text-[10px] text-slate-500 font-mono mt-1 truncate" title="${escapeHtml(ev.destination_account_id)}">
+        <div class="text-[10px] text-slate-400 font-mono mt-1 truncate" title="${escapeHtml(ev.destination_account_id)}">
           ${escapeHtml(ev.destination_account_id)}${ev.stripe_transfer_id ? " · " + escapeHtml(ev.stripe_transfer_id) : ""}
         </div>
       </div>`;
@@ -1024,7 +1027,7 @@ async function loadPasskeys() {
 
 function renderPasskeyList(credentials) {
   if (!credentials.length) {
-    passkeyList.innerHTML = `<p class="text-slate-500 text-xs">No passkeys yet — PIN step-ups still work either way.</p>`;
+    passkeyList.innerHTML = `<p class="text-slate-400 text-xs">No passkeys yet — PIN step-ups still work either way.</p>`;
     return;
   }
   passkeyList.innerHTML = credentials
@@ -1032,7 +1035,7 @@ function renderPasskeyList(credentials) {
       (c) => `
       <div class="bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs flex items-center justify-between">
         <span>${escapeHtml(c.label || "Passkey")}</span>
-        <span class="text-slate-500 font-mono text-[10px]">${escapeHtml(c.credential_id.slice(0, 10))}…</span>
+        <span class="text-slate-400 font-mono text-[10px]">${escapeHtml(c.credential_id.slice(0, 10))}…</span>
       </div>`
     )
     .join("");
@@ -1076,7 +1079,7 @@ async function loadBpayBillers() {
 
 function renderBpayBillerList(billers) {
   if (!billers.length) {
-    bpayBillerList.innerHTML = `<p class="text-slate-500 text-xs">No saved billers yet.</p>`;
+    bpayBillerList.innerHTML = `<p class="text-slate-400 text-xs">No saved billers yet.</p>`;
     return;
   }
   bpayBillerList.innerHTML = billers
@@ -1084,7 +1087,7 @@ function renderBpayBillerList(billers) {
       (b) => `
       <div class="bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs">
         <div class="font-medium">${escapeHtml(b.nickname)}</div>
-        <div class="text-slate-500 font-mono mt-0.5">Code ${escapeHtml(b.biller_code)} · CRN ${escapeHtml(b.crn)}</div>
+        <div class="text-slate-400 font-mono mt-0.5">Code ${escapeHtml(b.biller_code)} · CRN ${escapeHtml(b.crn)}</div>
       </div>`
     )
     .join("");
@@ -1101,7 +1104,7 @@ async function loadPayees() {
 
 function renderPayeeList(payees) {
   if (!payees.length) {
-    payeeList.innerHTML = `<p class="text-slate-500 text-xs">No contacts yet — messages to a new name will require a PIN.</p>`;
+    payeeList.innerHTML = `<p class="text-slate-400 text-xs">No contacts yet — messages to a new name will require a PIN.</p>`;
     return;
   }
   payeeList.innerHTML = payees
@@ -1111,7 +1114,7 @@ function renderPayeeList(payees) {
       <div class="payee-card bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs" data-payee-id="${p.payee_id}">
         <div class="flex items-center justify-between">
           <span class="font-medium">${escapeHtml(p.nickname)}</span>
-          <span class="${tracked ? "text-emerald-400" : "text-slate-500"} text-[10px] font-semibold uppercase">
+          <span class="${tracked ? "text-emerald-400" : "text-slate-400"} text-[10px] font-semibold uppercase">
             ${tracked ? "receiver tracked" : escapeHtml(p.type)}
           </span>
         </div>
@@ -1306,7 +1309,7 @@ async function loadPaymentMethods() {
 
 function renderPmList(pms) {
   if (!pms.length) {
-    pmList.innerHTML = `<p class="text-slate-500 text-xs">No payment methods yet — payments can't be executed until one is added.</p>`;
+    pmList.innerHTML = `<p class="text-slate-400 text-xs">No payment methods yet — payments can't be executed until one is added.</p>`;
     return;
   }
   pmList.innerHTML = pms
@@ -1370,7 +1373,7 @@ function renderChainStatus(verifyRes) {
 
 function renderAuditEvents(events) {
   if (!events.length) {
-    auditEvents.innerHTML = `<p class="text-slate-500">No events yet.</p>`;
+    auditEvents.innerHTML = `<p class="text-slate-400">No events yet.</p>`;
     return;
   }
   auditEvents.innerHTML = events
@@ -1380,9 +1383,9 @@ function renderAuditEvents(events) {
         <div class="border border-slate-800 rounded-lg p-2.5 ${i === events.length - 1 ? "ring-1 ring-emerald-700/60" : ""}">
           <div class="flex items-center justify-between">
             <span class="font-medium text-slate-200">${escapeHtml(ev.event_type)}</span>
-            <span class="text-slate-500">${time}</span>
+            <span class="text-slate-400">${time}</span>
           </div>
-          <div class="font-mono text-[10px] text-slate-500 mt-1 truncate" title="${ev.event_hash}">
+          <div class="font-mono text-[10px] text-slate-400 mt-1 truncate" title="${ev.event_hash}">
             #${ev.event_hash.slice(0, 12)}
           </div>
         </div>`;
@@ -1398,7 +1401,29 @@ window.VocalVoice.create({
   micStatus,
   textInput,
   onState: (on) => setListening(on),
+  // Anything started by voice is treated as a public-space payment: hide details until revealed.
+  onResult: () => VocalPrivacy.set("privateMode", true),
 });
+
+// --- Privacy, spoken replies and display settings (see privacy.js) ------------
+
+const privateToggle = document.getElementById("private-toggle");
+privateToggle.addEventListener("click", () => VocalPrivacy.set("privateMode", !VocalPrivacy.get().privateMode));
+
+const speakRepliesInput = document.getElementById("speak-replies");
+const highContrastInput = document.getElementById("high-contrast");
+const textSizeSelect = document.getElementById("text-size");
+
+function syncDisplaySettings() {
+  const p = VocalPrivacy.get();
+  speakRepliesInput.checked = p.speak;
+  highContrastInput.checked = p.highContrast;
+  textSizeSelect.value = p.textSize;
+}
+speakRepliesInput.addEventListener("change", () => VocalPrivacy.set("speak", speakRepliesInput.checked));
+highContrastInput.addEventListener("change", () => VocalPrivacy.set("highContrast", highContrastInput.checked));
+textSizeSelect.addEventListener("change", () => VocalPrivacy.set("textSize", textSizeSelect.value));
+syncDisplaySettings();
 
 function setListening(on) {
   listening = on;

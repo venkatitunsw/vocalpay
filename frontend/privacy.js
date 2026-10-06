@@ -1,0 +1,134 @@
+// Privacy mode, auto-lock, spoken replies and display settings. Stored on this device only.
+(() => {
+  const PREF_KEY = "vocalpay.prefs";
+  const IDLE_LOCK_MS = 120000;
+  const TEXT_SCALE = { standard: "100%", large: "118%", xlarge: "136%" };
+  const defaults = { privateMode: false, speak: false, highContrast: false, textSize: "standard" };
+
+  let prefs = { ...defaults };
+  let idleTimer = null;
+  let locked = false;
+
+  function load() {
+    try {
+      prefs = { ...defaults, ...JSON.parse(localStorage.getItem(PREF_KEY) || "{}") };
+    } catch (err) {
+      prefs = { ...defaults };
+    }
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+    } catch (err) {
+      // Blocked storage means the choice only lasts for this page load.
+    }
+  }
+
+  // Wraps a value that should be hidden in private mode. Visible normally; blurred and tap-to-reveal when private.
+  function sens(html) {
+    const tab = prefs.privateMode ? ' tabindex="0" role="button" aria-label="Hidden. Activate to reveal."' : "";
+    return `<span class="sens"${tab}>${html}</span>`;
+  }
+
+  function applyPrefs() {
+    document.body.classList.toggle("private", prefs.privateMode);
+    document.documentElement.classList.toggle("hc", prefs.highContrast);
+    document.documentElement.style.fontSize = TEXT_SCALE[prefs.textSize] || "100%";
+    const toggle = document.getElementById("private-toggle");
+    if (toggle) {
+      toggle.setAttribute("aria-pressed", String(prefs.privateMode));
+      toggle.classList.toggle("bg-slate-800", prefs.privateMode);
+    }
+    document.querySelectorAll(".sens").forEach((el) => {
+      if (prefs.privateMode) {
+        el.setAttribute("tabindex", "0");
+        el.setAttribute("role", "button");
+        el.setAttribute("aria-label", "Hidden. Activate to reveal.");
+      } else {
+        el.removeAttribute("tabindex");
+        el.removeAttribute("role");
+        el.removeAttribute("aria-label");
+        el.classList.remove("revealed");
+      }
+    });
+    if (!prefs.privateMode) unlock();
+    resetIdle();
+  }
+
+  function set(key, value) {
+    prefs[key] = value;
+    save();
+    applyPrefs();
+  }
+
+  function reveal(el) {
+    el.classList.toggle("revealed");
+  }
+
+  function lock() {
+    if (!prefs.privateMode || locked) return;
+    locked = true;
+    document.querySelectorAll(".sens.revealed").forEach((el) => el.classList.remove("revealed"));
+    document.body.classList.add("locked");
+    const banner = document.getElementById("lock-banner");
+    if (banner) banner.classList.remove("hidden");
+  }
+
+  function unlock() {
+    locked = false;
+    document.body.classList.remove("locked");
+    const banner = document.getElementById("lock-banner");
+    if (banner) banner.classList.add("hidden");
+  }
+
+  function resetIdle() {
+    clearTimeout(idleTimer);
+    if (prefs.privateMode) idleTimer = setTimeout(lock, IDLE_LOCK_MS);
+  }
+
+  // Spoken replies: in private mode the spoken text never includes the hidden details.
+  function speak(text) {
+    if (!prefs.speak || !("speechSynthesis" in window)) return;
+    const line = prefs.privateMode ? "Reply hidden. Reveal it on screen to hear the details." : text;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
+  }
+
+  document.addEventListener("click", (e) => {
+    if (locked) {
+      unlock();
+      resetIdle();
+      return;
+    }
+    const el = e.target.closest(".sens");
+    if (el && prefs.privateMode) reveal(el);
+    resetIdle();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (locked) {
+      unlock();
+      resetIdle();
+      return;
+    }
+    if ((e.key === "Enter" || e.key === " ") && e.target.classList && e.target.classList.contains("sens")) {
+      e.preventDefault();
+      reveal(e.target);
+    }
+    resetIdle();
+  });
+  document.addEventListener("pointermove", () => {
+    if (!locked) resetIdle();
+  });
+
+  load();
+  window.VocalPrivacy = {
+    get: () => ({ ...prefs }),
+    set,
+    sens,
+    speak,
+    applyPrefs,
+    isPrivate: () => prefs.privateMode,
+  };
+  document.addEventListener("DOMContentLoaded", applyPrefs);
+})();

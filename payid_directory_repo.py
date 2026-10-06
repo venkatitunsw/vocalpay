@@ -39,13 +39,9 @@ def _format_display(digits: str) -> str:
 
 
 def seed_payid_directory(count: int = 200) -> None:
-    """Idempotent: only populates the table if it's empty."""
+    """Idempotent: safe to run on every startup. Fills in an email for each entry that lacks one."""
     conn = get_conn()
     try:
-        existing = conn.execute("SELECT COUNT(*) AS n FROM payid_directory").fetchone()["n"]
-        if existing >= count:
-            return
-
         rows = []
         seen = set()
         # Deterministic pseudo-random-looking mobile numbers: 04xx xxx xxx,
@@ -59,11 +55,13 @@ def seed_payid_directory(count: int = 200) -> None:
             seen.add(digits)
             first = _FIRST_NAMES[i % len(_FIRST_NAMES)]
             last = _LAST_NAMES[(i * 3) % len(_LAST_NAMES)]
-            rows.append((digits, _format_display(digits), f"{first} {last}"))
+            email = f"{first.lower()}.{last.lower()}{i}@example.com"
+            rows.append((digits, _format_display(digits), f"{first} {last}", email))
 
         conn.executemany(
-            "INSERT INTO payid_directory (phone_number, display_number, registered_name) "
-            "VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+            "INSERT INTO payid_directory (phone_number, display_number, registered_name, email) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (phone_number) DO UPDATE SET email = COALESCE(payid_directory.email, EXCLUDED.email)",
             rows,
         )
         conn.commit()
@@ -78,8 +76,23 @@ def lookup_payid(raw_number: str) -> dict | None:
     conn = get_conn()
     try:
         row = conn.execute(
-            "SELECT phone_number, display_number, registered_name FROM payid_directory WHERE phone_number=?",
+            "SELECT phone_number, display_number, registered_name, email FROM payid_directory WHERE phone_number=?",
             (digits,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def lookup_payid_email(raw_email: str) -> dict | None:
+    email = (raw_email or "").strip().lower()
+    if not email:
+        return None
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT phone_number, display_number, registered_name, email FROM payid_directory WHERE LOWER(email)=?",
+            (email,),
         ).fetchone()
         return dict(row) if row else None
     finally:
