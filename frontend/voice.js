@@ -3,7 +3,7 @@
 // Transcripts only fill the composer; the user still presses send.
 (() => {
   const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm";
-  const WHISPER_MODEL = "Xenova/whisper-tiny.en";
+  const WHISPER_MODEL = "Xenova/whisper-base.en";
   const SAMPLE_RATE = 16000;
   const FRAME_MS = 20;
   const MIN_SPEECH_MS = 300;

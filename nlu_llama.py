@@ -16,6 +16,8 @@ NLU_SYSTEM_PROMPT = (
     "amount, including casual words like 'bucks' or 'dollars'. Use action 'pay' only for a clear request to send money; "
     "otherwise use 'none'. amount is a positive number in the stated currency, or null if not given. "
     "target is the payee name or PayID digits exactly as written, or null. "
+    "note is the reason for the payment: the words after 'for' (e.g. 'for lunch' gives 'lunch', "
+    "'for the taxi' gives 'the taxi'), or a labelled note; null if there is none. "
     "If the message is unclear, contradictory, or has two different amounts without a correction, "
     "list the problem in ambiguities."
 )
