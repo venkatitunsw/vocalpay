@@ -7,10 +7,12 @@ from psycopg.rows import dict_row
 
 SCHEMA_PATH = Path("db") / "schema.sql"
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://vocalpay:vocalpay@localhost:5433/vocalpay",  # docker-compose.yml
-)
+_LOCAL_DATABASE_URL = "postgresql://vocalpay:vocalpay@localhost:5433/vocalpay"  # docker-compose.yml
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    if os.getenv("RENDER"):
+        raise RuntimeError("DATABASE_URL is not set. Add your Neon connection string in the Render dashboard.")
+    DATABASE_URL = _LOCAL_DATABASE_URL
 
 # Tests set this to a unique prefix per test so every domain schema is throwaway.
 # None means production names: payments, directory, services, passkeys, memory.
