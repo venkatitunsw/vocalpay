@@ -413,10 +413,17 @@ composer.addEventListener("submit", async (e) => {
   } finally {
     sendBtn.disabled = false;
     textInput.disabled = false;
-    textInput.focus();
+    focusPendingCardOrComposer();
     refreshAuditIfOpen();
   }
 });
+
+// After a reply, keyboard users go straight to a waiting confirmation field; otherwise back to the composer.
+function focusPendingCardOrComposer() {
+  const fields = feed.querySelectorAll(".normal-form input, .pin-box[data-idx='0']");
+  if (fields.length) fields[fields.length - 1].focus();
+  else textInput.focus();
+}
 
 // --- Service provider flow (tried first when the text names a bill or provider) ---
 
@@ -927,10 +934,37 @@ function renderReceiverEvidence(ev) {
 
 // --- Side panel (Setup / Audit Log tabs) ----------------------------------------
 
+const drawerBackdrop = document.getElementById("drawer-backdrop");
+const srAnnounce = document.getElementById("sr-announce");
+const SR_KEY = "vocalpay.srAnnounce";
+let lastFocusedBeforeDrawer = null;
+
+function applyScreenReaderSetting(on) {
+  feed.setAttribute("aria-live", on ? "polite" : "off");
+  srAnnounce.checked = on;
+}
+
+try {
+  applyScreenReaderSetting(localStorage.getItem(SR_KEY) === "1");
+} catch (err) {
+  applyScreenReaderSetting(false);
+}
+
+srAnnounce.addEventListener("change", () => {
+  applyScreenReaderSetting(srAnnounce.checked);
+  try {
+    localStorage.setItem(SR_KEY, srAnnounce.checked ? "1" : "0");
+  } catch (err) {
+    // Preference is per device; if storage is blocked it simply lasts for this page.
+  }
+});
+
 function openPanel(tab) {
+  if (!state.panelOpen) lastFocusedBeforeDrawer = document.activeElement;
   state.panelOpen = true;
   state.activeTab = tab;
-  sidePanel.classList.remove("-mr-96");
+  sidePanel.classList.remove("translate-x-full");
+  drawerBackdrop.classList.remove("hidden");
   panelSetup.classList.toggle("hidden", tab !== "setup");
   panelSetup.classList.toggle("flex", tab === "setup");
   panelAudit.classList.toggle("hidden", tab !== "audit");
@@ -939,14 +973,25 @@ function openPanel(tab) {
   auditToggle.classList.toggle("bg-slate-800", tab === "audit");
   if (tab === "setup") loadSetupData();
   if (tab === "audit") refreshAudit();
+  sidePanel.focus();
 }
 
 function closePanel() {
   state.panelOpen = false;
-  sidePanel.classList.add("-mr-96");
+  sidePanel.classList.add("translate-x-full");
+  drawerBackdrop.classList.add("hidden");
   setupToggle.classList.remove("bg-slate-800");
   auditToggle.classList.remove("bg-slate-800");
+  if (lastFocusedBeforeDrawer && document.contains(lastFocusedBeforeDrawer)) {
+    lastFocusedBeforeDrawer.focus();
+  }
 }
+
+drawerBackdrop.addEventListener("click", closePanel);
+document.querySelectorAll(".drawer-close").forEach((btn) => btn.addEventListener("click", closePanel));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.panelOpen) closePanel();
+});
 
 setupToggle.addEventListener("click", () => {
   if (state.panelOpen && state.activeTab === "setup") closePanel();
@@ -1063,15 +1108,22 @@ function renderPayeeList(payees) {
     .map((p) => {
       const tracked = Boolean(p.stripe_connected_account_id);
       return `
-      <div class="bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs">
+      <div class="payee-card bg-slate-800/60 border border-slate-800 rounded-lg px-3 py-2 text-xs" data-payee-id="${p.payee_id}">
         <div class="flex items-center justify-between">
           <span class="font-medium">${escapeHtml(p.nickname)}</span>
           <span class="${tracked ? "text-emerald-400" : "text-slate-500"} text-[10px] font-semibold uppercase">
             ${tracked ? "receiver tracked" : escapeHtml(p.type)}
           </span>
         </div>
-        ${p.phone_number ? `<div class="text-slate-500 font-mono mt-0.5">PayID: ${escapeHtml(p.phone_number)}</div>` : ""}
         ${p.linked_contact_id ? `<div class="text-sky-400/80 mt-0.5">Same person as another saved number</div>` : ""}
+        <ul class="payid-list mt-1 space-y-0.5 text-slate-400 font-mono"></ul>
+        <form class="payid-add-form mt-1.5 flex items-center gap-1.5">
+          <label class="sr-only" for="payid-input-${p.payee_id}">Add a PayID for ${escapeHtml(p.nickname)}</label>
+          <input id="payid-input-${p.payee_id}" type="text" placeholder="Another mobile, email or ABN"
+            class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-[11px] outline-none focus:ring-2 focus:ring-emerald-500" />
+          <button type="submit" class="text-[11px] px-2 py-1 rounded-md border border-slate-700 hover:bg-slate-800 whitespace-nowrap">Add PayID</button>
+        </form>
+        <p class="payid-feedback text-[11px] h-4 mt-0.5"></p>
         ${tracked ? `<button class="check-balance-btn text-emerald-400 hover:text-emerald-300 mt-1 underline underline-offset-2" data-payee-id="${p.payee_id}">Check receiver balance</button>
         <div class="balance-result text-slate-400 mt-1"></div>` : ""}
       </div>`;
@@ -1081,6 +1133,49 @@ function renderPayeeList(payees) {
   payeeList.querySelectorAll(".check-balance-btn").forEach((btn) => {
     btn.addEventListener("click", () => checkReceiverBalance(btn));
   });
+  payeeList.querySelectorAll(".payee-card").forEach((card) => {
+    loadPayIdsInto(card);
+    card.querySelector(".payid-add-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      addPayIdFromCard(card);
+    });
+  });
+}
+
+async function loadPayIdsInto(card) {
+  const list = card.querySelector(".payid-list");
+  try {
+    const res = await api(`/payees/${card.dataset.payeeId}/payids`);
+    list.innerHTML = res.payids
+      .map(
+        (p) => `<li>${escapeHtml(p.pay_id_type)}: ${escapeHtml(p.value_normalized)}${p.is_primary ? ' <span class="text-emerald-400 not-italic font-sans">(primary)</span>' : ""}</li>`
+      )
+      .join("");
+  } catch (err) {
+    list.innerHTML = `<li class="text-rose-400">Could not load PayIDs: ${escapeHtml(err.message)}</li>`;
+  }
+}
+
+async function addPayIdFromCard(card) {
+  const input = card.querySelector(".payid-add-form input");
+  const feedback = card.querySelector(".payid-feedback");
+  const value = input.value.trim();
+  if (!value) return;
+  try {
+    const res = await api(`/payees/${card.dataset.payeeId}/payids`, { method: "POST", body: { value } });
+    if (res.ok) {
+      feedback.textContent = `Added ${res.pay_id_type} PayID.`;
+      feedback.className = "payid-feedback text-[11px] h-4 mt-0.5 text-emerald-400";
+      input.value = "";
+      loadPayIdsInto(card);
+    } else {
+      feedback.textContent = res.error || "Could not add that PayID.";
+      feedback.className = "payid-feedback text-[11px] h-4 mt-0.5 text-rose-400";
+    }
+  } catch (err) {
+    feedback.textContent = `Request failed: ${err.message}`;
+    feedback.className = "payid-feedback text-[11px] h-4 mt-0.5 text-rose-400";
+  }
 }
 
 async function checkReceiverBalance(btn) {

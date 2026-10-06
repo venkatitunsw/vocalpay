@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="h-screen bg-slate-950 text-slate-100 overflow-hidden">
+  <a href="#text-input" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 bg-emerald-500 text-slate-950 px-3 py-2 rounded-md text-sm font-medium">Skip to message box</a>
   <div class="flex h-full">
 
     <!-- Main chat column -->
@@ -38,14 +39,14 @@
       </header>
 
       <!-- Message feed -->
-      <main id="feed" class="flex-1 overflow-y-auto px-4 py-6 space-y-4 max-w-2xl w-full mx-auto"></main>
+      <main id="feed" role="log" aria-label="Conversation" aria-live="off" class="flex-1 overflow-y-auto px-4 py-6 space-y-4 max-w-2xl w-full mx-auto"></main>
 
       <!-- Composer -->
       <footer class="border-t border-slate-800 bg-slate-900/60 backdrop-blur px-4 py-3">
-        <form id="composer" class="max-w-2xl w-full mx-auto flex items-end gap-2">
+        <form id="composer" aria-label="Send a payment or question" class="max-w-2xl w-full mx-auto flex items-end gap-2">
           <button type="button" id="mic-btn"
             class="shrink-0 h-11 w-11 rounded-full flex items-center justify-center border border-slate-700 text-slate-300 hover:bg-slate-800 transition relative"
-            title="Voice input">
+            title="Voice input" aria-label="Voice input">
             <svg id="mic-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5">
               <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Z"/>
               <path d="M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.92V20H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-2.08A7 7 0 0 0 19 11Z"/>
@@ -54,13 +55,13 @@
           </button>
 
           <div class="flex-1 relative">
-            <textarea id="text-input" rows="1" placeholder='Try: "Pay 12 to John for dinner"'
+            <textarea id="text-input" rows="1" aria-label="Message" placeholder='Try: "Pay 12 to John for dinner"'
               class="w-full resize-none bg-slate-800 rounded-2xl px-4 py-3 pr-4 text-sm outline-none focus:ring-2 focus:ring-emerald-500 placeholder:text-slate-500"></textarea>
           </div>
 
           <button type="submit"
             class="shrink-0 h-11 w-11 rounded-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 flex items-center justify-center transition disabled:opacity-40"
-            id="send-btn">
+            id="send-btn" aria-label="Send">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5 -mr-0.5">
               <path d="M3.4 20.6 21 12 3.4 3.4 3 10l13 2-13 2z"/>
             </svg>
@@ -70,15 +71,28 @@
       </footer>
     </div>
 
-    <!-- Side panel: Setup / Audit Log (tabbed, one drawer) -->
-    <aside id="side-panel"
-      class="w-96 shrink-0 border-l border-slate-800 bg-slate-900/80 backdrop-blur flex flex-col -mr-96 transition-[margin] duration-300">
+    <div id="drawer-backdrop" class="hidden fixed inset-0 bg-black/50 z-30"></div>
+
+    <!-- Drawer: Setup / Audit Log (tabbed, overlays the chat) -->
+    <aside id="side-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1"
+      class="fixed inset-y-0 right-0 z-40 w-96 max-w-full border-l border-slate-800 bg-slate-900 flex flex-col translate-x-full transition-transform duration-300 outline-none">
 
       <!-- Setup tab -->
       <div id="panel-setup" class="flex-1 overflow-y-auto flex flex-col">
+        <div class="px-4 py-3 border-b border-slate-800 flex items-start justify-between gap-3">
+          <div>
+            <h2 id="drawer-title" class="text-sm font-semibold">Setup</h2>
+            <p class="text-[11px] text-slate-500">demo-user's contacts &amp; payment methods</p>
+          </div>
+          <button type="button" class="drawer-close text-xs px-2 py-1 rounded-md border border-slate-700 hover:bg-slate-800">Close</button>
+        </div>
+
         <div class="px-4 py-3 border-b border-slate-800">
-          <h2 class="text-sm font-semibold">Setup</h2>
-          <p class="text-[11px] text-slate-500">demo-user's contacts &amp; payment methods</p>
+          <label class="flex items-center gap-2 text-xs text-slate-300">
+            <input id="sr-announce" type="checkbox" class="accent-emerald-500" />
+            Screen reader announcements
+          </label>
+          <p class="text-[11px] text-slate-500 mt-1">Announces new messages and results. Stored on this device only.</p>
         </div>
 
         <div class="px-4 py-3 border-b border-slate-800">
@@ -140,7 +154,10 @@
             <h2 class="text-sm font-semibold">Audit Log</h2>
             <p class="text-[11px] text-slate-500">tamper-evident hash chain</p>
           </div>
-          <span id="chain-status" class="text-[11px] font-medium px-2 py-1 rounded-md bg-slate-800 text-slate-400">—</span>
+          <div class="flex items-center gap-2">
+            <span id="chain-status" class="text-[11px] font-medium px-2 py-1 rounded-md bg-slate-800 text-slate-400">—</span>
+            <button type="button" class="drawer-close text-xs px-2 py-1 rounded-md border border-slate-700 hover:bg-slate-800">Close</button>
+          </div>
         </div>
         <div id="audit-events" class="flex-1 overflow-y-auto px-4 py-3 space-y-2 text-xs"></div>
       </div>
