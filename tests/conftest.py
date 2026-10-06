@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import db as db_module
+import support_chat
 
 
 @pytest.fixture()
@@ -29,5 +30,6 @@ def client(monkeypatch):
         with TestClient(main.app) as c:
             yield c
     finally:
+        support_chat.reset_graph()
         with psycopg.connect(db_module.DATABASE_URL, autocommit=True) as admin:
             admin.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

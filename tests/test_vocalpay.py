@@ -3,6 +3,9 @@ from datetime import datetime, timedelta, timezone
 import db as db_module
 import main
 import support_chat
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from intent_parser import parse_text_command
 
 
@@ -1112,18 +1115,29 @@ def test_extract_text_handles_stringified_content_blocks():
     assert support_chat._extract_text("Plain string reply") == "Plain string reply"
 
 
-def test_support_chat_history_persists_per_user_not_per_session(client):
+class _CountingModel(BaseChatModel):
+    @property
+    def _llm_type(self) -> str:
+        return "counting-fake"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        human_turns = sum(1 for m in messages if m.type == "human")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=f"turn {human_turns}"))])
+
+
+def test_support_chat_memory_survives_graph_restart(client, monkeypatch):
     from users_repo import DEMO_USER_ID
 
-    support_chat._save_message(DEMO_USER_ID, "human", "What's my balance?")
-    support_chat._save_message(DEMO_USER_ID, "ai", "You have no payment method on file yet.")
+    monkeypatch.setattr(support_chat, "_build_model", lambda: _CountingModel())
 
-    history = support_chat._load_history(DEMO_USER_ID)
-    assert len(history) == 2
-    assert history[0].content == "What's my balance?"
-    assert history[0].type == "human"
-    assert history[1].content == "You have no payment method on file yet."
-    assert history[1].type == "ai"
+    assert support_chat.get_support_reply(DEMO_USER_ID, "My bank is CBA") == "turn 1"
+
+    support_chat.reset_graph()
+
+    assert support_chat.get_support_reply(DEMO_USER_ID, "What bank did I say?") == "turn 2"
 
 
 # --- BPAY rail: parsing, CRN validation, and the full command -> confirm -> execute flow ---

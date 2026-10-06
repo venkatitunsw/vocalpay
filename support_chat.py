@@ -1,12 +1,16 @@
 import ast
 import os
-from datetime import datetime, timezone
-from uuid import uuid4
 
-from langchain_core.messages import HumanMessage, AIMessage
+import psycopg
+from psycopg.rows import dict_row
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages.utils import trim_messages
 from langchain_core.tools import tool
-from langchain.agents import create_agent
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
+import db
 from db import get_conn
 from payees_repo import find_payees_by_name
 from transactions_repo import list_recent_transactions, get_transaction
@@ -36,9 +40,13 @@ SYSTEM_PROMPT = (
     "Keep answers short and conversational, like a real support agent, not a wall of text."
 )
 
-# One agent instance per process — cheap to reuse, and avoids reconnecting to
-# the Ollama server on every single chat message.
-_agent = None
+# Prompt window: the checkpointer keeps the full thread, but only the most recent
+# messages are sent to the model on each turn.
+MEMORY_WINDOW_MESSAGES = int(os.getenv("MEMORY_WINDOW_MESSAGES", "20"))
+
+_graph = None
+_graph_schema = None
+_saver_conn = None
 
 
 def _build_model():
@@ -61,11 +69,58 @@ def _build_model():
     )
 
 
-def _get_agent():
-    global _agent
-    if _agent is None:
-        _agent = create_agent(_build_model(), tools=_build_tools(), system_prompt=SYSTEM_PROMPT)
-    return _agent
+def _checkpointer():
+    global _saver_conn
+    kwargs = {"autocommit": True, "row_factory": dict_row}
+    if db.DB_SCHEMA:
+        kwargs["options"] = f"-c search_path={db.DB_SCHEMA}"
+    _saver_conn = psycopg.connect(db.DATABASE_URL, **kwargs)
+    saver = PostgresSaver(_saver_conn)
+    saver.setup()
+    return saver
+
+
+def _build_graph():
+    tools = _build_tools()
+    bound_model = _build_model().bind_tools(tools)
+
+    def call_model(state: MessagesState):
+        window = trim_messages(
+            state["messages"],
+            max_tokens=MEMORY_WINDOW_MESSAGES,
+            token_counter=len,
+            strategy="last",
+            start_on="human",
+            include_system=False,
+        )
+        response = bound_model.invoke([SystemMessage(content=SYSTEM_PROMPT)] + window)
+        return {"messages": [response]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("agent", call_model)
+    builder.add_node("tools", ToolNode(tools))
+    builder.add_edge(START, "agent")
+    builder.add_conditional_edges("agent", tools_condition)
+    builder.add_edge("tools", "agent")
+    return builder.compile(checkpointer=_checkpointer())
+
+
+def _get_graph():
+    global _graph, _graph_schema
+    if _graph is None or _graph_schema != db.DB_SCHEMA:
+        reset_graph()
+        _graph = _build_graph()
+        _graph_schema = db.DB_SCHEMA
+    return _graph
+
+
+def reset_graph() -> None:
+    """Drops the cached graph and its Postgres connection; the next call rebuilds from the stored thread."""
+    global _graph, _saver_conn
+    if _saver_conn is not None:
+        _saver_conn.close()
+    _saver_conn = None
+    _graph = None
 
 
 def _build_tools():
@@ -152,49 +207,17 @@ def _build_tools():
     return [list_contacts, recent_transactions, transaction_status, check_receiver_balance, explain_payment_policy]
 
 
-def _load_history(user_id: str, limit: int = 20) -> list:
-    conn = get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
-            (user_id, limit),
-        ).fetchall()
-    finally:
-        conn.close()
-    rows = list(reversed(rows))
-    return [
-        HumanMessage(content=r["content"]) if r["role"] == "human" else AIMessage(content=r["content"])
-        for r in rows
-    ]
-
-
-def _save_message(user_id: str, role: str, content: str) -> None:
-    conn = get_conn()
-    try:
-        conn.execute(
-            "INSERT INTO chat_messages (message_id, user_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (str(uuid4()), user_id, role, content, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def get_support_reply(user_id: str, message: str) -> str:
     """
-    Runs the user's message through the support agent, with their past
-    conversation (persisted in the DB per-user, not per-session, so it
-    survives closing the tab or the service restarting) as context, then
-    persists both sides of this turn for next time.
+    Runs one turn through the LangGraph support agent. The thread is keyed by
+    user_id and stored in Postgres, so the conversation survives restarts and
+    cold starts.
     """
-    agent = _get_agent()
-    history = _load_history(user_id)
-    result = agent.invoke({"messages": history + [HumanMessage(content=message)]})
-    reply = _extract_text(result["messages"][-1].content)
-
-    _save_message(user_id, "human", message)
-    _save_message(user_id, "ai", reply)
-    return reply
+    result = _get_graph().invoke(
+        {"messages": [HumanMessage(content=message)]},
+        config={"configurable": {"thread_id": user_id}},
+    )
+    return _extract_text(result["messages"][-1].content)
 
 
 def _extract_text(content) -> str:
