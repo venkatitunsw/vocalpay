@@ -49,6 +49,7 @@ from transactions_repo import (
     set_receiver_evidence,
 )
 from bpay_parser import parse_bpay_command, is_bpay_command
+from payee_payids_repo import add_payid, list_payids, find_payee_by_payid_value
 from services_repo import seed_services, list_providers, list_invoices, find_open_invoice, get_invoice, mark_invoice_paid
 from transactions_repo import create_pending_service_transaction
 from bpay_repo import (
@@ -182,7 +183,19 @@ def command_text(req: TextCommandRequest):
     payee_record = None
     exists = False
 
-    if looks_like_payid(intent.payee_name):
+    if "@" in intent.payee_name:
+        payee_record = find_payee_by_payid_value(DEMO_USER_ID, intent.payee_name.strip().lower())
+        if payee_record is None:
+            return {
+                "ok": False,
+                "rail": "payid",
+                "decision": {"decision": "BLOCK", "reason": "No saved contact has that email PayID. Add it to a contact in Setup first.",
+                             "required_confirmation": "none", "risk_level": "high"},
+            }
+        exists = True
+        intent.payee_name = payee_record["nickname"]
+        append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "email"})
+    elif looks_like_payid(intent.payee_name):
         # The user typed a number, not a name — resolve it as a PayID rather
         # than a nickname. Real-world PayID networks (and things like Zelle)
         # let you pay any *registered* PayID immediately — saving the person
@@ -247,6 +260,7 @@ def command_text(req: TextCommandRequest):
             finally:
                 conn.close()
 
+            add_payid(DEMO_USER_ID, new_payee_id, directory_match["display_number"])
             payee_record = get_payee(new_payee_id)
             exists = True
             append_event(req.session_id, "PAYID_AUTO_PROVISIONED", {
@@ -397,6 +411,23 @@ class AddPayeeRequest(BaseModel):
 from datetime import datetime, timezone
 from uuid import uuid4
 from db import get_conn
+
+class AddPayIDRequest(BaseModel):
+    value: str
+    label: str | None = None
+
+
+@app.get("/payees/{payee_id}/payids")
+def payee_list_payids(payee_id: str):
+    return {"payids": list_payids(payee_id)}
+
+
+@app.post("/payees/{payee_id}/payids")
+def payee_add_payid(payee_id: str, req: AddPayIDRequest):
+    if not get_payee(payee_id):
+        return {"ok": False, "error": "Unknown contact"}
+    return add_payid(DEMO_USER_ID, payee_id, req.value, req.label)
+
 
 @app.post("/payees/add")
 def add_payee(req: AddPayeeRequest):
@@ -567,6 +598,7 @@ def add_contact(req: AddContactRequest):
         conn.commit()
     finally:
         conn.close()
+    add_payid(DEMO_USER_ID, payee_id, phone_number)
 
     return {
         "ok": True,

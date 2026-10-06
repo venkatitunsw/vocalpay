@@ -82,6 +82,12 @@ def _run_migrations(conn) -> None:
     for table, columns in _MIGRATIONS.items():
         for column, col_type in columns.items():
             conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
+    conn.execute(
+        "INSERT INTO payee_payids (payid_id, payee_id, user_id, pay_id_type, value_normalized, is_primary, created_at) "
+        "SELECT payee_id || ':mobile', payee_id, user_id, 'mobile', regexp_replace(phone_number, '[^0-9]', '', 'g'), 1, created_at "
+        "FROM payees WHERE phone_number IS NOT NULL AND phone_number <> '' "
+        "ON CONFLICT DO NOTHING"
+    )
 
 
 def init_db() -> None:

@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime, timedelta, timezone
 
 import db as db_module
@@ -1457,3 +1458,69 @@ def test_service_execute_refused_before_confirmation(client):
     assert r.json()["ok"] is False
     invoices = {i["invoice_id"]: i for i in client.get("/services/invoices").json()["invoices"]}
     assert invoices["inv-opal-top"]["status"] == "open"
+
+
+# --- PayID validation: mobile, email, ABN; one owner per PayID; email payments ---
+
+def test_payid_validation_accepts_valid_forms():
+    from payid_validation import classify_payid
+    assert classify_payid("0412 345 678") == ("mobile", "0412345678")
+    assert classify_payid("+61 412 345 678") == ("mobile", "0412345678")
+    assert classify_payid("Bob@Example.com ") == ("email", "bob@example.com")
+    assert classify_payid("51 824 753 556") == ("abn", "51824753556")  # ATO example ABN
+
+
+def test_payid_validation_rejects_with_specific_reasons():
+    from payid_validation import classify_payid, PayIDValidationError
+    with pytest.raises(PayIDValidationError, match="7 digits"):
+        classify_payid("0412345")
+    with pytest.raises(PayIDValidationError, match="starts with 04"):
+        classify_payid("0312345678")
+    with pytest.raises(PayIDValidationError, match="one @"):
+        classify_payid("bob@@x.com")
+    with pytest.raises(PayIDValidationError, match="doesn't look valid"):
+        classify_payid("bob@x")
+    with pytest.raises(PayIDValidationError, match="check-digit"):
+        classify_payid("12345678901")
+
+
+def test_same_contact_can_hold_several_payids_and_first_is_primary(client):
+    _add_contact(client, "Alice", "0400 111 222")
+    payee_id = client.get("/payees").json()["payees"][0]["payee_id"]
+
+    r = client.post(f"/payees/{payee_id}/payids", json={"value": "alice@home.com", "label": "home"})
+    assert r.json()["ok"] is True
+    payids = client.get(f"/payees/{payee_id}/payids").json()["payids"]
+    assert {p["pay_id_type"] for p in payids} == {"mobile", "email"}
+    assert [p for p in payids if p["is_primary"]][0]["value_normalized"] == "0400111222"
+
+
+def test_payid_already_held_by_another_contact_is_refused_with_owner_named(client):
+    _add_contact(client, "Alice", "0400 111 222")
+    _add_contact(client, "Bob", "0400 333 444")
+    bob_id = [p for p in client.get("/payees").json()["payees"] if p["nickname"] == "Bob"][0]["payee_id"]
+
+    r = client.post(f"/payees/{bob_id}/payids", json={"value": "0400 111 222"})
+    body = r.json()
+    assert body["ok"] is False
+    assert "belongs to Alice" in body["error"]
+    assert body["conflict"]["nickname"] == "Alice"
+
+
+def test_pay_by_email_resolves_to_saved_contact(client):
+    _add_contact(client, "Carol", "0400 555 666")
+    _add_default_payment_method(client)
+    carol_id = client.get("/payees").json()["payees"][0]["payee_id"]
+    assert client.post(f"/payees/{carol_id}/payids", json={"value": "carol@work.com.au"}).json()["ok"] is True
+
+    session_id = _new_session(client)
+    body = client.post("/command/text", json={"session_id": session_id, "text": "Pay 5 to carol@work.com.au"}).json()
+    assert body.get("intent", {}).get("payee_name") == "Carol"
+    assert body["decision"]["decision"] != "BLOCK"
+
+
+def test_pay_by_unknown_email_is_blocked_with_clear_reason(client):
+    session_id = _new_session(client)
+    body = client.post("/command/text", json={"session_id": session_id, "text": "Pay 5 to nobody@x.com"}).json()
+    assert body["ok"] is False
+    assert "No saved contact has that email PayID" in body["decision"]["reason"]

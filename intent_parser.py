@@ -14,8 +14,8 @@ AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?")
 # The target character class includes ":" and parens so an explicit PayID
 # qualifier attached to a name — "Ava Hill PayID: 0427 499 675" or
 # "Ava Hill (0427 499 675)" — parses as one target instead of failing outright.
-_TARGET_CHARS = r"[a-zA-Z0-9\s\.\-':()]"
-_TARGET_STOP = r"(?=\s+for\b|[,.]|$)"
+_TARGET_CHARS = r"[a-zA-Z0-9\s\.\-':()@]"
+_TARGET_STOP = r"(?=\s+for\b|,|\.+(?:\s|$)|$)"
 TO_TARGET_RE = re.compile(rf"\bto\s+(?P<target>[a-zA-Z0-9]{_TARGET_CHARS}*?){_TARGET_STOP}", re.IGNORECASE)
 ON_ACCOUNT_RE = re.compile(rf"\bon\s+(?P<target>[a-zA-Z0-9]{_TARGET_CHARS}*?)(?:'s)?\s+account\b", re.IGNORECASE)
 # The bare "for X" fallback also stops before a trailing amount (e.g. "for

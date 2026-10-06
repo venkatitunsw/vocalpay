@@ -184,3 +184,21 @@ CREATE TABLE IF NOT EXISTS service_invoices (
   FOREIGN KEY (provider_id) REFERENCES service_providers(provider_id),
   FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
+
+-- Every PayID a contact can be paid by. A contact may have several (mobile,
+-- email, ABN); value_normalized is unique across all contacts so one PayID can
+-- only ever belong to one person.
+CREATE TABLE IF NOT EXISTS payee_payids (
+  payid_id TEXT PRIMARY KEY,
+  payee_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  pay_id_type TEXT NOT NULL,            -- "mobile" | "email" | "abn"
+  value_normalized TEXT NOT NULL UNIQUE,
+  label TEXT,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (payee_id) REFERENCES payees(payee_id),
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payee_payids_payee ON payee_payids(payee_id);
