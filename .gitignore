@@ -17,3 +17,5 @@ Thumbs.db
 
 # Claude Code local session state
 .claude/
+.neon
+node_modules/
