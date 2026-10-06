@@ -1296,42 +1296,14 @@ function renderAuditEvents(events) {
   auditEvents.scrollTop = auditEvents.scrollHeight;
 }
 
-// --- Voice input (Web Speech API — voice-ready foundation) ---------------------
+// --- Voice input (Whisper in the browser, Web Speech fallback; see voice.js) ----
 
-const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
-let listening = false;
-
-if (!SpeechRecognitionImpl) {
-  micBtn.disabled = true;
-  micBtn.title = "Voice input not supported in this browser";
-  micBtn.classList.add("opacity-40", "cursor-not-allowed");
-} else {
-  recognizer = new SpeechRecognitionImpl();
-  recognizer.continuous = false;
-  recognizer.interimResults = false;
-  recognizer.lang = "en-AU";
-
-  recognizer.onresult = (e) => {
-    const transcript = e.results[0][0].transcript;
-    textInput.value = transcript;
-    textInput.focus();
-  };
-  recognizer.onerror = () => {
-    micStatus.textContent = "Couldn't hear that — try again.";
-  };
-  recognizer.onend = () => setListening(false);
-
-  micBtn.addEventListener("click", () => {
-    if (listening) {
-      recognizer.stop();
-    } else {
-      micStatus.textContent = "";
-      recognizer.start();
-      setListening(true);
-    }
-  });
-}
+window.VocalVoice.create({
+  micBtn,
+  micStatus,
+  textInput,
+  onState: (on) => setListening(on),
+});
 
 function setListening(on) {
   listening = on;

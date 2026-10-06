@@ -1028,54 +1028,6 @@ def test_normalize_spoken_numbers_converts_digit_word_runs():
     assert normalize_spoken_numbers("I have one apple and two oranges") == "I have one apple and two oranges"
 
 
-# --- Local voice transcription (faster-whisper) -- model mocked, no real download/inference ---
-
-def test_voice_transcribe_returns_text(client, monkeypatch):
-    import voice_service
-    monkeypatch.setattr(voice_service, "transcribe_audio_bytes", lambda audio_bytes, suffix=".wav": "pay twelve to john")
-
-    session_id = _new_session(client)
-    r = client.post(
-        "/voice/transcribe",
-        data={"session_id": session_id},
-        files={"audio": ("clip.wav", b"fake-wav-bytes", "audio/wav")},
-    )
-    body = r.json()
-    assert body["ok"] is True
-    assert body["text"] == "pay twelve to john"
-
-    events = client.get(f"/audit/{session_id}/events").json()["events"]
-    assert "VOICE_TRANSCRIBE_SUCCESS" in [e["event_type"] for e in events]
-
-
-def test_voice_transcribe_rejects_empty_audio(client):
-    session_id = _new_session(client)
-    r = client.post(
-        "/voice/transcribe",
-        data={"session_id": session_id},
-        files={"audio": ("clip.wav", b"", "audio/wav")},
-    )
-    assert r.json() == {"ok": False, "error": "No audio received"}
-
-
-def test_voice_transcribe_handles_backend_failure(client, monkeypatch):
-    import voice_service
-
-    def _boom(audio_bytes, suffix=".wav"):
-        raise RuntimeError("model failed to load")
-
-    monkeypatch.setattr(voice_service, "transcribe_audio_bytes", _boom)
-    session_id = _new_session(client)
-    r = client.post(
-        "/voice/transcribe",
-        data={"session_id": session_id},
-        files={"audio": ("clip.wav", b"fake-wav-bytes", "audio/wav")},
-    )
-    body = r.json()
-    assert body["ok"] is False
-    assert body["error"] == "Transcription failed"
-
-
 def test_llm_provider_switches_to_ollama_without_api_key(monkeypatch):
     monkeypatch.setattr(support_chat, "LLM_PROVIDER", "ollama")
     model = support_chat._build_model()

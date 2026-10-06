@@ -944,33 +944,6 @@ def pay_execute(req: ExecutePaymentRequest):
     }
 
 
-@app.post("/voice/transcribe")
-async def voice_transcribe(session_id: str = Form(...), audio: UploadFile = File(...)):
-    """
-    Local speech-to-text via faster-whisper (CPU, int8) -- an alternative to
-    the browser's built-in SpeechRecognition that needs no cloud API and
-    works the same locally or in production. Heavier than the browser API
-    (loads a real model into memory on first call, with a one-time weight
-    download), so it's additive: the frontend's mic button still works via
-    the browser API where available, and can fall back to this endpoint.
-    """
-    audio_bytes = await audio.read()
-    if not audio_bytes:
-        return {"ok": False, "error": "No audio received"}
-
-    append_event(session_id, "VOICE_TRANSCRIBE_START", {"filename": audio.filename, "bytes": len(audio_bytes)})
-    try:
-        from voice_service import transcribe_audio_bytes
-        suffix = os.path.splitext(audio.filename or "")[1] or ".wav"
-        text = transcribe_audio_bytes(audio_bytes, suffix=suffix)
-    except Exception as e:
-        append_event(session_id, "VOICE_TRANSCRIBE_FAILED", {"error": str(e)})
-        return {"ok": False, "error": "Transcription failed", "details": str(e)}
-
-    append_event(session_id, "VOICE_TRANSCRIBE_SUCCESS", {"text": text})
-    return {"ok": True, "text": text}
-
-
 @app.post("/webauthn/register/begin")
 def webauthn_register_begin():
     """Step 1 of registering a passkey: returns the options object for the
