@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   rail TEXT NOT NULL DEFAULT 'payid',   -- "payid" (card -> Stripe/Connect) | "bpay" (simulated settlement)
   bpay_biller_code TEXT,
   bpay_crn TEXT,
+  service_invoice_id TEXT,              -- set when rail='service': the invoice being paid
   created_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(user_id),
   FOREIGN KEY (payee_id) REFERENCES payees(payee_id)
@@ -159,3 +160,27 @@ CREATE TABLE IF NOT EXISTS recurring_schedules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_recurring_schedules_due ON recurring_schedules(status, next_run_at);
+
+-- Service providers (mock utilities, telco, health, transport) and the open
+-- invoices a user owes them. Settlement is simulated, like BPAY.
+CREATE TABLE IF NOT EXISTS service_providers (
+  provider_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL,               -- "utility" | "telco" | "health" | "transport"
+  accent TEXT NOT NULL                  -- colour key for the UI rail, e.g. "indigo"
+);
+
+CREATE TABLE IF NOT EXISTS service_invoices (
+  invoice_id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  customer_ref TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'AUD',
+  due_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',  -- "open" | "paid"
+  paid_txn_id TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (provider_id) REFERENCES service_providers(provider_id),
+  FOREIGN KEY (user_id) REFERENCES users(user_id)
+);

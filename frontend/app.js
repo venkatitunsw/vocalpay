@@ -384,6 +384,17 @@ composer.addEventListener("submit", async (e) => {
       // and fall through to normal routing below rather than guessing.
     }
 
+    if (SERVICE_HINT_RE.test(text)) {
+      const svc = await api("/services/command", {
+        method: "POST",
+        body: { session_id: state.sessionId, text },
+      });
+      if (svc.ok) {
+        await handleServiceCommandResponse(svc);
+        return;
+      }
+    }
+
     if (/\bbpay\b/i.test(text)) {
       const res = await api("/bpay/command", {
         method: "POST",
@@ -406,6 +417,30 @@ composer.addEventListener("submit", async (e) => {
     refreshAuditIfOpen();
   }
 });
+
+// --- Service provider flow (tried first when the text names a bill or provider) ---
+
+const SERVICE_HINT_RE = /\b(bill|invoice|top[- ]?up|telstra|agl|opal|sydney water|dr smith)\b/i;
+
+// Colour per payment rail: emerald = peer to peer, indigo = service provider, amber = BPAY.
+const RAIL_STYLE = {
+  payid: { label: "Peer to peer", border: "border-emerald-500", text: "text-emerald-300" },
+  service: { label: "Service provider", border: "border-indigo-500", text: "text-indigo-300" },
+  bpay: { label: "BPAY", border: "border-amber-500", text: "text-amber-300" },
+};
+
+async function handleServiceCommandResponse(res) {
+  appendAssistantBubble(res.read_back);
+  renderConfirmationCard(
+    {
+      intent: { amount: res.invoice.amount_cents / 100, currency: res.invoice.currency, payee_name: res.invoice.provider_name, note: null },
+      txn_id: res.txn_id,
+      confirmation: res.confirmation,
+      payee: null,
+    },
+    { executeEndpoint: "/services/execute", rail: "service" }
+  );
+}
 
 // --- BPAY command flow (routed above whenever the text mentions "BPAY") ---------
 
@@ -577,6 +612,8 @@ function renderConfirmationCard(cmdRes, opts = {}) {
   const required = confirmation.required_confirmation;
   const executeEndpoint = opts.executeEndpoint || "/pay/execute";
   const rail = opts.rail || "payid";
+  const railStyle = RAIL_STYLE[rail] || RAIL_STYLE.payid;
+  card.classList.add("border-l-4", railStyle.border);
 
   state.activeDraft = {
     confirmationId: confirmation.confirmation_id,
@@ -588,7 +625,7 @@ function renderConfirmationCard(cmdRes, opts = {}) {
 
   const header = `
     <div class="flex items-center justify-between">
-      <span class="text-xs uppercase tracking-wide text-slate-400">Confirm payment</span>
+      <span class="text-xs uppercase tracking-wide ${railStyle.text}">${railStyle.label}</span>
       <span class="text-[11px] px-2 py-0.5 rounded-full ${required === "pin" ? "bg-amber-500/20 text-amber-300" : "bg-slate-700 text-slate-300"}">
         ${required === "pin" ? "PIN required" : "Type CONFIRM"}
       </span>
@@ -816,7 +853,7 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
   const endpoint = executeEndpoint || "/pay/execute";
   payBtn.disabled = true;
   payBtn.innerHTML = `<span class="inline-flex items-center gap-2 justify-center w-full">
-    <span class="spinner"></span> ${endpoint === "/bpay/execute" ? "Settling via BPAY…" : "Authorizing through Stripe…"}
+    <span class="spinner"></span> ${endpoint === "/bpay/execute" ? "Settling via BPAY…" : endpoint === "/services/execute" ? "Settling with provider…" : "Authorizing through Stripe…"}
   </span>`;
 
   try {
@@ -825,10 +862,11 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
       body: { session_id: state.sessionId, txn_id: txnId },
     });
 
-    if (res.ok && endpoint === "/bpay/execute") {
+    if (res.ok && (endpoint === "/bpay/execute" || endpoint === "/services/execute")) {
+      const railLabel = endpoint === "/bpay/execute" ? "BPAY" : "Service provider";
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-1">
-          <div class="text-emerald-300 font-medium">BPAY payment ${escapeHtml(res.final_status)}</div>
+          <div class="text-emerald-300 font-medium">${railLabel} payment ${escapeHtml(res.final_status)}</div>
           <div class="text-[11px] text-emerald-500/80 font-mono">${escapeHtml(res.simulated_reference)}</div>
           <div class="text-[10px] text-slate-500">${escapeHtml(res.note)}</div>
         </div>`;

@@ -56,6 +56,34 @@ def get_conn():
     return _Conn(psycopg.connect(DATABASE_URL, **kwargs))
 
 
+_MIGRATIONS = {
+    "payees": {
+        "phone_number": "TEXT",
+        "stripe_connected_account_id": "TEXT",
+        "is_contact": "INTEGER NOT NULL DEFAULT 1",
+        "linked_contact_id": "TEXT",
+    },
+    "transactions": {
+        "stripe_transfer_id": "TEXT",
+        "destination_account_id": "TEXT",
+        "receiver_confirmed_at": "TEXT",
+        "rail": "TEXT NOT NULL DEFAULT 'payid'",
+        "bpay_biller_code": "TEXT",
+        "bpay_crn": "TEXT",
+        "service_invoice_id": "TEXT",
+    },
+    "confirmations": {
+        "challenge": "TEXT",
+    },
+}
+
+
+def _run_migrations(conn) -> None:
+    for table, columns in _MIGRATIONS.items():
+        for column, col_type in columns.items():
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
+
+
 def init_db() -> None:
     if not SCHEMA_PATH.exists():
         raise FileNotFoundError(f"Missing schema file: {SCHEMA_PATH}")
@@ -65,6 +93,7 @@ def init_db() -> None:
     conn = get_conn()
     try:
         conn.executescript(schema_sql)
+        _run_migrations(conn)
         conn.commit()
     finally:
         conn.close()

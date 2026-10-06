@@ -1457,3 +1457,51 @@ def test_command_text_uses_llama_canonical_when_flag_on(client, monkeypatch):
     assert body["intent"]["amount"] == 12.0
     assert body["intent"]["payee_name"] == "John"
     assert body["decision"]["decision"] == "BLOCK"
+
+
+# --- Service providers: pay an open invoice through the same confirm steps as every rail ---
+
+def test_service_pay_invoice_end_to_end(client):
+    session_id = client.post("/session/new").json()["session_id"]
+
+    r = client.post("/services/command", json={"session_id": session_id, "text": "pay my Opal top up"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["rail"] == "service"
+    assert body["invoice"]["provider_name"] == "Opal"
+    assert body["invoice"]["amount_cents"] == 2840
+    assert body["decision"]["required_confirmation"] == "normal"
+
+    confirmation_id = body["confirmation"]["confirmation_id"]
+    r = client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": confirmation_id, "phrase": "CONFIRM"})
+    assert r.json()["status"] == "confirmed"
+
+    r = client.post("/services/execute", json={"session_id": session_id, "txn_id": body["txn_id"]})
+    assert r.json()["final_status"] == "succeeded"
+
+    invoices = {i["invoice_id"]: i for i in client.get("/services/invoices").json()["invoices"]}
+    assert invoices["inv-opal-top"]["status"] == "paid"
+    assert invoices["inv-opal-top"]["paid_txn_id"] == body["txn_id"]
+
+
+def test_service_large_bill_requires_pin(client):
+    session_id = client.post("/session/new").json()["session_id"]
+    body = client.post("/services/command", json={"session_id": session_id, "text": "pay AGL"}).json()
+    assert body["invoice"]["amount_cents"] == 18990
+    assert body["decision"]["required_confirmation"] == "pin"
+
+
+def test_service_unknown_provider_is_refused(client):
+    session_id = client.post("/session/new").json()["session_id"]
+    body = client.post("/services/command", json={"session_id": session_id, "text": "pay my gym"}).json()
+    assert body["ok"] is False
+    assert body["rail"] == "service"
+
+
+def test_service_execute_refused_before_confirmation(client):
+    session_id = client.post("/session/new").json()["session_id"]
+    body = client.post("/services/command", json={"session_id": session_id, "text": "pay Opal"}).json()
+    r = client.post("/services/execute", json={"session_id": session_id, "txn_id": body["txn_id"]})
+    assert r.json()["ok"] is False
+    invoices = {i["invoice_id"]: i for i in client.get("/services/invoices").json()["invoices"]}
+    assert invoices["inv-opal-top"]["status"] == "open"

@@ -49,6 +49,8 @@ from transactions_repo import (
     set_receiver_evidence,
 )
 from bpay_parser import parse_bpay_command, is_bpay_command
+from services_repo import seed_services, list_providers, list_invoices, find_open_invoice, get_invoice, mark_invoice_paid
+from transactions_repo import create_pending_service_transaction
 from bpay_repo import (
     seed_bpay_directory,
     lookup_biller,
@@ -82,6 +84,7 @@ def on_startup():
     ensure_demo_user()
     seed_payid_directory()
     seed_bpay_directory()
+    seed_services(DEMO_USER_ID)
     load_dotenv()
     init_stripe()
 
@@ -369,6 +372,7 @@ def command_text(req: TextCommandRequest):
 
     return {
         "ok": True,
+        "rail": "payid",
         "intent": intent.model_dump(),
         "payee_exists": exists,
         "payee": payee_info,
@@ -1175,6 +1179,7 @@ def bpay_command(req: BpayCommandRequest):
     )
     return {
         "ok": True,
+        "rail": "bpay",
         "biller": biller,
         "parsed": parsed_summary,
         "decision": {"decision": "PROCEED" if required_confirmation == "normal" else "STEP_UP",
@@ -1250,6 +1255,99 @@ def bpay_execute(req: ExecuteBpayRequest):
         "final_status": "succeeded",
         "simulated_reference": simulated_reference,
         "note": "BPAY settlement is simulated in this demo -- no real BPAY network exists in Stripe test mode.",
+    }
+
+
+@app.get("/services/providers")
+def services_providers():
+    return {"providers": list_providers()}
+
+
+@app.get("/services/invoices")
+def services_invoices():
+    return {"invoices": list_invoices(DEMO_USER_ID)}
+
+
+class ServiceCommandRequest(BaseModel):
+    session_id: str
+    text: str
+
+
+@app.post("/services/command")
+def services_command(req: ServiceCommandRequest):
+    """
+    Resolves 'pay my Telstra bill' to that provider's open invoice and creates a
+    pending service transaction. Goes through the same confirm/PIN steps as
+    every other rail. Amounts come from the invoice, never from the message.
+    """
+    append_event(req.session_id, "SERVICE_COMMAND_RECEIVED", {"text": req.text})
+    invoice = find_open_invoice(DEMO_USER_ID, req.text)
+    if not invoice:
+        return {"ok": False, "rail": "service", "error": "No open bill found for that provider."}
+
+    amount_cents = invoice["amount_cents"]
+    required_confirmation = _bpay_confirmation_requirement(amount_cents)
+    txn_id = create_pending_service_transaction(
+        session_id=req.session_id,
+        user_id=DEMO_USER_ID,
+        amount_cents=amount_cents,
+        currency=invoice["currency"],
+        invoice_id=invoice["invoice_id"],
+    )
+    append_event(req.session_id, "TXN_CREATED", {"txn_id": txn_id, "amount_cents": amount_cents, "currency": invoice["currency"], "rail": "service"})
+
+    conf = create_confirmation(txn_id=txn_id, user_id=DEMO_USER_ID, required_confirmation=required_confirmation)
+    append_event(req.session_id, "CONFIRMATION_CREATED", conf)
+
+    read_back = (
+        f"Confirm: Pay {invoice['currency']} {amount_cents / 100:.2f} to {invoice['provider_name']} "
+        f"(account {invoice['customer_ref']}, due {invoice['due_date']}). Required: {required_confirmation.upper()}"
+    )
+    return {
+        "ok": True,
+        "rail": "service",
+        "invoice": invoice,
+        "decision": {"decision": "PROCEED" if required_confirmation == "normal" else "STEP_UP",
+                     "reason": "Service bill resolved", "required_confirmation": required_confirmation, "risk_level": "low"},
+        "txn_id": txn_id,
+        "confirmation": conf,
+        "read_back": read_back,
+    }
+
+
+class ServiceExecuteRequest(BaseModel):
+    session_id: str
+    txn_id: str
+
+
+@app.post("/services/execute")
+def services_execute(req: ServiceExecuteRequest):
+    """Settles a confirmed service payment. Simulated, like BPAY, and logged as such."""
+    txn = get_transaction(req.txn_id)
+    if not txn or txn.get("rail") != "service":
+        return {"ok": False, "error": "Service transaction not found"}
+    if txn["status"] != "confirmed":
+        append_event(req.session_id, "PAY_EXECUTE_BLOCKED", {"reason": "txn not confirmed", "status": txn["status"], "txn_id": req.txn_id})
+        return {"ok": False, "error": f"Transaction status must be confirmed (found {txn['status']})"}
+
+    invoice = get_invoice(txn["service_invoice_id"])
+    simulated_reference = f"SVC-SIM-{uuid4().hex[:12].upper()}"
+    update_transaction_status(req.txn_id, "succeeded")
+    mark_invoice_paid(txn["service_invoice_id"], req.txn_id)
+    append_event(req.session_id, "SERVICE_SETTLEMENT_SIMULATED", {
+        "txn_id": req.txn_id,
+        "invoice_id": txn["service_invoice_id"],
+        "provider": invoice["provider_name"] if invoice else None,
+        "amount_cents": txn["amount_cents"],
+        "simulated_reference": simulated_reference,
+    })
+    return {
+        "ok": True,
+        "rail": "service",
+        "txn_id": req.txn_id,
+        "final_status": "succeeded",
+        "simulated_reference": simulated_reference,
+        "note": "Service provider settlement is simulated in this demo.",
     }
 
 

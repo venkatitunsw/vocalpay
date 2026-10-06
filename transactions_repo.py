@@ -59,6 +59,28 @@ def create_pending_bpay_transaction(
     finally:
         conn.close()
 
+def create_pending_service_transaction(session_id: str, user_id: str, amount_cents: int, currency: str, invoice_id: str) -> str:
+    """Same lifecycle as the BPAY rail, for an open service-provider invoice (rail='service')."""
+    txn_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO transactions
+            (txn_id, session_id, user_id, amount_cents, currency, payee_id, status,
+             stripe_payment_intent_id, rail, service_invoice_id, created_at)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, 'service', ?, ?)
+            """,
+            (txn_id, session_id, user_id, amount_cents, currency, "created", invoice_id, now),
+        )
+        conn.commit()
+        return txn_id
+    finally:
+        conn.close()
+
+
 def update_transaction_status(txn_id: str, status: str) -> None:
     conn = get_conn()
     try:
