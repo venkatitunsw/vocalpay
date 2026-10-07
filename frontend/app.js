@@ -398,7 +398,7 @@ composer.addEventListener("submit", async (e) => {
       }
     }
 
-    if (/\bbpay\b/i.test(text)) {
+    if (/\bbpay\b|\bbiller\s*code\b/i.test(text)) {
       const res = await api("/bpay/command", {
         method: "POST",
         body: { session_id: state.sessionId, text },
@@ -1412,16 +1412,19 @@ privateToggle.addEventListener("click", () => VocalPrivacy.set("privateMode", !V
 
 const speakRepliesInput = document.getElementById("speak-replies");
 const highContrastInput = document.getElementById("high-contrast");
+const darkThemeInput = document.getElementById("dark-theme");
 const textSizeSelect = document.getElementById("text-size");
 
 function syncDisplaySettings() {
   const p = VocalPrivacy.get();
   speakRepliesInput.checked = p.speak;
   highContrastInput.checked = p.highContrast;
+  darkThemeInput.checked = p.dark;
   textSizeSelect.value = p.textSize;
 }
 speakRepliesInput.addEventListener("change", () => VocalPrivacy.set("speak", speakRepliesInput.checked));
 highContrastInput.addEventListener("change", () => VocalPrivacy.set("highContrast", highContrastInput.checked));
+darkThemeInput.addEventListener("change", () => VocalPrivacy.set("dark", darkThemeInput.checked));
 textSizeSelect.addEventListener("change", () => VocalPrivacy.set("textSize", textSizeSelect.value));
 syncDisplaySettings();
 

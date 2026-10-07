@@ -3,7 +3,7 @@
   const PREF_KEY = "vocalpay.prefs";
   const IDLE_LOCK_MS = 120000;
   const TEXT_SCALE = { standard: "100%", large: "118%", xlarge: "136%" };
-  const defaults = { privateMode: false, speak: false, highContrast: false, textSize: "standard" };
+  const defaults = { privateMode: false, speak: false, highContrast: false, textSize: "standard", dark: false };
 
   let prefs = { ...defaults };
   let idleTimer = null;
@@ -34,6 +34,7 @@
   function applyPrefs() {
     document.body.classList.toggle("private", prefs.privateMode);
     document.documentElement.classList.toggle("hc", prefs.highContrast);
+    document.documentElement.classList.toggle("dark", prefs.dark);
     document.documentElement.style.fontSize = TEXT_SCALE[prefs.textSize] || "100%";
     const toggle = document.getElementById("private-toggle");
     if (toggle) {

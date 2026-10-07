@@ -4,7 +4,7 @@ import re
 # BPAY commands have a different slot shape (biller, CRN, amount) and this
 # keeps the already-tested PayID/name payment parsing completely unaffected.
 
-BPAY_KEYWORD_RE = re.compile(r"\bbpay\b", re.IGNORECASE)
+BPAY_KEYWORD_RE = re.compile(r"\bbpay\b|\bbiller\s*code\b", re.IGNORECASE)
 AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?")
 BILLER_CODE_RE = re.compile(r"biller\s*code\s*[:\-]?\s*(?P<code>\d+)", re.IGNORECASE)
 CRN_RE = re.compile(r"(?:reference|crn|ref)\s*[:\-]?\s*(?P<crn>\d[\d\s]*\d|\d)", re.IGNORECASE)
