@@ -1,0 +1,88 @@
+* { box-sizing: border-box; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 999px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+textarea#text-input { field-sizing: content; max-height: 140px; }
+
+.pin-box {
+  width: 2.75rem;
+  height: 3.25rem;
+  text-align: center;
+  font-size: 1.25rem;
+  font-weight: 600;
+  border-radius: 0.75rem;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f1f5f9;
+  outline: none;
+}
+.pin-box:focus { border-color: #10b981; box-shadow: 0 0 0 2px rgba(16,185,129,.35); }
+
+@keyframes waveform-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.waveform-bar {
+  width: 3px;
+  border-radius: 999px;
+  background: #f43f5e;
+  animation: waveform-bar 0.9s ease-in-out infinite;
+}
+
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 2px solid rgba(148,163,184,.35);
+  border-top-color: #10b981;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Private mode: values stay in the layout (so the page doesn't shift) but are blurred until revealed. */
+.sens { border-radius: 4px; transition: filter .15s; }
+body.private .sens:not(.revealed) {
+  filter: blur(6px);
+  user-select: none;
+  cursor: pointer;
+  background: rgba(148, 163, 184, .18);
+}
+body.private .sens:not(.revealed):focus-visible { outline: 2px solid #10b981; outline-offset: 2px; }
+body.locked .sens { filter: blur(6px) !important; }
+
+/* High contrast: pure black and white, with brighter text and visible borders. */
+html.hc, html.hc body { background: #000 !important; color: #fff !important; }
+html.hc [class*="bg-slate-9"], html.hc [class*="bg-slate-8"], html.hc [class*="bg-slate-5"] { background-color: #000 !important; }
+html.hc [class*="text-slate-"], html.hc [class*="text-emerald-"], html.hc [class*="text-rose-"],
+html.hc [class*="text-amber-"], html.hc [class*="text-indigo-"], html.hc [class*="text-sky-"] { color: #fff !important; }
+html.hc [class*="border-"] { border-color: #fff !important; }
+html.hc button, html.hc input, html.hc textarea, html.hc select { border: 1px solid #fff !important; }
+html.hc [class*="bg-emerald-500"] { background-color: #6ee7b7 !important; color: #000 !important; }
+html.hc .sens:not(.revealed) { background: #333 !important; }
+
+/* Light theme (default). Remaps the dark Tailwind palette used across the app. Add class "dark" on <html> to restore it. */
+html:not(.dark), html:not(.dark) body { background-color: #ffffff !important; color: #0f172a !important; }
+html:not(.dark) .bg-slate-950, html:not(.dark) .bg-slate-900,
+html:not(.dark) .bg-slate-950\/60, html:not(.dark) .bg-slate-900\/60, html:not(.dark) .bg-slate-900\/80 { background-color: #ffffff !important; }
+html:not(.dark) .bg-slate-800, html:not(.dark) .bg-slate-800\/60 { background-color: #f1f5f9 !important; }
+html:not(.dark) .bg-slate-700 { background-color: #e2e8f0 !important; }
+html:not(.dark) .bg-slate-900\/60 { background-color: #ffffff !important; }
+html:not(.dark) .border-slate-800, html:not(.dark) .border-slate-700 { border-color: #cbd5e1 !important; }
+html:not(.dark) .text-slate-100, html:not(.dark) .text-slate-200 { color: #0f172a !important; }
+html:not(.dark) .text-slate-300 { color: #334155 !important; }
+html:not(.dark) .text-slate-400, html:not(.dark) .text-slate-500 { color: #475569 !important; }
+html:not(.dark) .placeholder\:text-slate-500::placeholder { color: #64748b !important; }
+html:not(.dark) .text-emerald-300, html:not(.dark) .text-emerald-400 { color: #047857 !important; }
+html:not(.dark) .text-indigo-300 { color: #4338ca !important; }
+html:not(.dark) .text-amber-200, html:not(.dark) .text-amber-300 { color: #92400e !important; }
+html:not(.dark) .text-rose-200, html:not(.dark) .text-rose-300, html:not(.dark) .text-rose-400 { color: #9f1239 !important; }
+html:not(.dark) .text-sky-400\/80, html:not(.dark) .text-sky-400 { color: #0369a1 !important; }
+html:not(.dark) .bg-emerald-950 { background-color: #ecfdf5 !important; }
+html:not(.dark) .bg-rose-950 { background-color: #fff1f2 !important; }
+html:not(.dark) .border-emerald-800 { border-color: #6ee7b7 !important; }
+html:not(.dark) .border-rose-800 { border-color: #fda4af !important; }
+html:not(.dark) .pin-box { background: #ffffff; color: #0f172a; border-color: #cbd5e1; }
+html:not(.dark) .sens:not(.revealed) { background: rgba(100, 116, 139, .18); }
+html:not(.dark) .bg-emerald-500 { color: #0f172a; }

@@ -19,3 +19,16 @@ Thumbs.db
 .claude/
 .neon
 node_modules/
+
+# Mobile (Capacitor/Android) build — see mobile/README.md
+mobile/node_modules/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/.gradle/
+mobile/android/capacitor-cordova-android-plugins/build/
+mobile/android/local.properties
+mobile/dist/
+mobile/tw-input.css
+# Large binary assets fetched once per mobile/README.md, not re-fetched by any build step
+mobile/www/models/
+mobile/www/vendor/*.wasm
