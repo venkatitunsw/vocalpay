@@ -5,7 +5,7 @@ import db as db_module
 import main
 import support_chat
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from intent_parser import parse_text_command
 
@@ -1569,3 +1569,73 @@ def test_tables_live_in_their_domain_schemas(client):
     assert placed["payid_directory"] == f"{db_module.DB_SCHEMA}_directory"
     assert placed["service_invoices"] == f"{db_module.DB_SCHEMA}_services"
     assert placed["passkey_credentials"] == f"{db_module.DB_SCHEMA}_passkeys"
+
+
+# --- Multi-agent support chat: routing -----------------------------------------
+
+def test_keyword_route_matches_each_domain():
+    assert support_chat._route({"messages": [HumanMessage(content="Who are my contacts?")]}) == "account_agent"
+    assert support_chat._route({"messages": [HumanMessage(content="What's the payment limit?")]}) == "account_agent"
+    assert support_chat._route({"messages": [HumanMessage(content="What was my last transaction?")]}) == "transactions_agent"
+    assert support_chat._route({"messages": [HumanMessage(content="Check Alice's receiver balance")]}) == "transactions_agent"
+    assert support_chat._route({"messages": [HumanMessage(content="What's my Telstra bill?")]}) == "bills_agent"
+    assert support_chat._route({"messages": [HumanMessage(content="Pay Origin BPAY")]}) == "bills_agent"
+
+
+class _FixedReplyModel(BaseChatModel):
+    text: str
+
+    @property
+    def _llm_type(self) -> str:
+        return "fixed-reply"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.text))])
+
+
+def test_llm_route_fallback_used_when_no_keyword_matches(monkeypatch):
+    # "My bank is CBA" matches no domain's keywords, so routing falls back to
+    # one classification call -- genuine reasoning for ambiguous phrasing,
+    # not a hardcoded guess.
+    monkeypatch.setattr(support_chat, "_build_model", lambda: _FixedReplyModel(text="bills"))
+    assert support_chat._llm_route("something ambiguous") == "bills"
+
+
+def test_llm_route_defaults_to_general_on_unparseable_reply(monkeypatch):
+    monkeypatch.setattr(support_chat, "_build_model", lambda: _FixedReplyModel(text="I have no idea what you mean"))
+    assert support_chat._llm_route("something ambiguous") == "general"
+
+
+def test_llm_route_defaults_to_general_when_model_errors(monkeypatch):
+    def _boom():
+        raise RuntimeError("Ollama unreachable")
+
+    monkeypatch.setattr(support_chat, "_build_model", _boom)
+    assert support_chat._llm_route("anything") == "general"
+
+
+# --- Multi-agent support chat: bills specialist's tools -------------------------
+
+def test_bills_tools_list_seeded_service_bills_and_billers(client):
+    tools = {t.name: t for t in support_chat._bills_tools()}
+
+    bills_text = tools["list_service_bills"].invoke({})
+    assert "Telstra" in bills_text
+
+    providers_text = tools["list_service_providers"].invoke({})
+    assert "Sydney Water" in providers_text
+
+    by_code = tools["lookup_bpay_biller"].invoke({"name_or_code": "111999"})
+    assert "Origin Energy" in by_code
+
+    by_name = tools["lookup_bpay_biller"].invoke({"name_or_code": "Telstra"})
+    assert "222888" in by_name
+
+    unknown = tools["lookup_bpay_biller"].invoke({"name_or_code": "Not A Real Biller"})
+    assert "No registered BPAY biller" in unknown
+
+    saved_text = tools["list_my_bpay_billers"].invoke({})
+    assert "No saved BPAY billers yet." in saved_text
