@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import re
 import time
 import stripe
 from dotenv import load_dotenv
@@ -47,8 +49,10 @@ from transactions_repo import (
     update_transaction_status,
     get_transaction,
     set_receiver_evidence,
+    find_recent_duplicate,
 )
 from bpay_parser import parse_bpay_command, is_bpay_command
+from recurring_parser import parse_recurring_command, is_recurring_command
 from payee_payids_repo import add_payid, list_payids, find_payee_by_payid_value
 from services_repo import seed_services, list_providers, list_invoices, find_open_invoice, get_invoice, mark_invoice_paid
 from transactions_repo import create_pending_service_transaction
@@ -68,6 +72,13 @@ from passkey_repo import list_credentials as list_passkey_credentials
 from passkey_service import begin_registration, finish_registration, begin_authentication, finish_authentication
 from security import verify_pin
 
+# Lets "Pay 12 to Dana again" bypass the duplicate-payment guardrail below --
+# stripped from the text before parsing (the payee-name regex otherwise
+# swallows a trailing word like this straight into the target) and checked
+# against the original text to decide whether to skip that guardrail.
+_DUPLICATE_BYPASS_WORDS = ("again", "duplicate", "anyway", "once more")
+_DUPLICATE_BYPASS_RE = re.compile(r"\b(?:" + "|".join(_DUPLICATE_BYPASS_WORDS) + r")\b", re.IGNORECASE)
+
 app = FastAPI(title="VocalPay")
 
 # Dev-only permissive CORS so the frontend (served from a different port) can call
@@ -79,6 +90,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Drives recurring payments without needing an external cron trigger -- see
+# _process_due_schedules. A plain in-process BackgroundScheduler is enough
+# here (one process, one instance); a multi-instance deployment would need a
+# distributed lock so only one instance fires a given due schedule.
+RECURRING_POLL_SECONDS = int(os.getenv("RECURRING_POLL_SECONDS", "300"))
+_scheduler = None
+
+
+def _run_due_schedules_job():
+    try:
+        _process_due_schedules("recurring-scheduler")
+    except Exception as e:
+        logging.getLogger("vocalpay.recurring").warning("Scheduled due-schedule run failed: %s", e)
+
+
+def _start_recurring_scheduler():
+    global _scheduler
+    if _scheduler is not None:
+        return
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    _scheduler = BackgroundScheduler(daemon=True)
+    _scheduler.add_job(
+        _run_due_schedules_job, "interval", seconds=RECURRING_POLL_SECONDS, max_instances=1, id="process_due_schedules",
+    )
+    _scheduler.start()
+
+
 @app.on_event("startup")
 def on_startup():
     init_db()
@@ -88,6 +127,15 @@ def on_startup():
     seed_services(DEMO_USER_ID)
     load_dotenv()
     init_stripe()
+    _start_recurring_scheduler()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    global _scheduler
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
 
 
 @app.get("/health")
@@ -210,8 +258,11 @@ def command_text(req: TextCommandRequest):
     # 1) log raw command
     append_event(req.session_id, "COMMAND_TEXT_RECEIVED", {"text": req.text})
 
-    # 2) parse: Llama proposes a canonical sentence when enabled; the regex parser is the fallback
-    parse_input = req.text
+    # 2) parse: Llama proposes a canonical sentence when enabled; the regex parser is the fallback.
+    # A duplicate-payment bypass word ("Pay 12 to Dana again") is stripped first -- left in, the
+    # payee-name regex happily swallows it into the target ("Dana again"), which then just fails
+    # to resolve as a contact instead of doing what the word was meant to say.
+    parse_input = _DUPLICATE_BYPASS_RE.sub("", req.text).strip()
     if NLU_LLAMA_ENABLED:
         canonical = llm_canonical_command(req.text)
         if canonical:
@@ -229,104 +280,29 @@ def command_text(req: TextCommandRequest):
     intent: PaymentIntentParsed = result.intent
     append_event(req.session_id, "INTENT_PARSED", intent.model_dump())
 
-    payee_record = None
-    exists = False
+    payee_record, exists, early_response = _resolve_payee_for_intent(req.session_id, intent)
+    if early_response is not None:
+        return early_response
 
-    if "@" in intent.payee_name:
-        payid_raw = intent.payee_name.strip().lower()
-        payee_record = find_payee_by_payid_value(DEMO_USER_ID, payid_raw)
-        exists = payee_record is not None
-        if not payee_record:
-            directory_match = lookup_payid_email(payid_raw)
-            append_event(req.session_id, "PAYEE_LOOKUP", {
-                "payee_name": payid_raw, "exists": False, "by": "email", "directory_match": directory_match,
-            })
-            if not directory_match:
-                return _blocked_response(req.session_id, intent, f'"{payid_raw}" is not a registered PayID.')
-            payee_record, blocked = _provision_directory_payee(
-                req.session_id, intent, directory_match, [directory_match["email"], directory_match["display_number"]],
-            )
-            if blocked:
-                return blocked
-            exists = True
-        intent.payee_name = payee_record["nickname"]
-        append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "email"})
-    elif looks_like_payid(intent.payee_name):
-        # The user typed a number, not a name — resolve it as a PayID rather
-        # than a nickname. Real-world PayID networks let you pay any *registered*
-        # PayID immediately; saving the person as a contact is a convenience,
-        # never a precondition. So: saved contacts first (by phone, regardless of
-        # formatting), then the external directory, provisioning a receiver
-        # account on the spot so the payment is still trackable.
-        payid_raw = intent.payee_name
-        payee_record = find_payee_by_phone(DEMO_USER_ID, payid_raw)
-        exists = payee_record is not None
-        if not payee_record:
-            directory_match = lookup_payid(payid_raw)
-            append_event(req.session_id, "PAYEE_LOOKUP", {
-                "payee_name": payid_raw, "exists": False, "by": "payid", "directory_match": directory_match,
-            })
-            if not directory_match:
-                return _blocked_response(req.session_id, intent, f'"{payid_raw}" is not a valid, registered PayID.')
-            payee_record, blocked = _provision_directory_payee(
-                req.session_id, intent, directory_match, [directory_match["display_number"]],
-            )
-            if blocked:
-                return blocked
-            exists = True
-
-        intent.payee_name = payee_record["nickname"]
-        append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "payid"})
-    else:
-        # Resolve the spoken/typed name against saved contacts — exact match first,
-        # then first-name (so "Alice" finds "Alice Wonderland"), then substring.
-        # More than one match at the same tier is genuinely ambiguous: ask rather
-        # than silently guessing which contact was meant.
-        matches = find_payees_by_name(DEMO_USER_ID, intent.payee_name)
-        if len(matches) > 1:
-            # Qualify each candidate with its PayID so two entries sharing a
-            # name (e.g. two "Ava Hill"s with different numbers) are never
-            # shown as indistinguishable duplicates — the user can then say
-            # the full name+number, or go to Setup and mark them as the same
-            # person if that's what they actually are.
-            candidate_labels = [
-                f"{m['nickname']} ({m['phone_number']})" if m.get("phone_number") else m["nickname"]
-                for m in matches
-            ]
-            append_event(req.session_id, "PAYEE_LOOKUP", {
-                "payee_name": intent.payee_name, "exists": True, "ambiguous": True, "candidates": candidate_labels,
-            })
+    # Duplicate-payment guardrail: the same payee + the same amount,
+    # already successfully sent in the last 5 minutes. A deterministic
+    # check against the real transaction log, not an LLM guessing at
+    # intent -- a real "you sure?" moment belongs in the audited pipeline
+    # that actually moves money, not left to an assistant's discretion.
+    # Says "again" (or similar) in the text itself bypasses it once, so a
+    # user who genuinely means to send the same amount twice isn't stuck
+    # until the 5-minute window lapses.
+    if payee_record and not _DUPLICATE_BYPASS_RE.search(req.text):
+        amount_cents = int(round(intent.amount * 100))
+        dup = find_recent_duplicate(DEMO_USER_ID, payee_record["payee_id"], amount_cents)
+        if dup and dup["status"] in ("confirmed", "succeeded"):
             reason = (
-                f"Multiple contacts match \"{intent.payee_name}\": {', '.join(candidate_labels)}. "
-                f"Say the PayID number to pick one, or open Setup and mark them as the same person if they are."
+                f"You already sent {intent.payee_name} {intent.currency} {intent.amount:.2f} a few minutes ago "
+                f"(txn {dup['txn_id']}). Say it again with \"again\" if you meant to send it a second time."
             )
-            append_event(req.session_id, "DECISION", {
-                "decision": "CLARIFY", "reason": reason, "required_confirmation": "none", "risk_level": "low",
-            })
-            return {
-                "ok": False,
-                "intent": intent.model_dump(),
-                "payee_exists": True,
-                "decision": {
-                    "decision": "CLARIFY",
-                    "reason": reason,
-                    "required_confirmation": "none",
-                    "risk_level": "low",
-                },
-                "candidates": candidate_labels,
-                "candidate_payees": [
-                    {"payee_id": m["payee_id"], "nickname": m["nickname"], "phone_number": m.get("phone_number")}
-                    for m in matches
-                ],
-            }
-
-        payee_record = matches[0] if matches else None
-        exists = payee_record is not None
-        if payee_record:
-            # Show/confirm against the resolved contact's full name, not whatever
-            # shorthand the user typed — same as a phone contacts lookup would.
-            intent.payee_name = payee_record["nickname"]
-        append_event(req.session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": exists})
+            decision_info = {"decision": "CLARIFY", "reason": reason, "required_confirmation": "none", "risk_level": "low"}
+            append_event(req.session_id, "DUPLICATE_PAYMENT_CLARIFY", {"original_txn_id": dup["txn_id"], **decision_info})
+            return {"ok": False, "intent": intent.model_dump(), "payee_exists": exists, "decision": decision_info}
 
     has_receiver_tracking = bool(payee_record.get("stripe_connected_account_id")) if payee_record else False
     decision = decide_next(
@@ -405,6 +381,117 @@ def command_text(req: TextCommandRequest):
         "confirmation": conf,
         "read_back": read_back,
     }
+
+
+def _resolve_payee_for_intent(session_id: str, intent: PaymentIntentParsed):
+    """
+    Shared by /command/text and /recurring/command: resolves intent.payee_name
+    against saved contacts, a directly-paid PayID, or an email PayID, the
+    same way regardless of which endpoint is asking. Returns
+    (payee_record, exists, early_response) -- early_response is not None
+    when resolution itself must end the request (CLARIFY/BLOCK), in which
+    case the caller returns it as-is without going any further.
+    """
+    payee_record = None
+    exists = False
+
+    if "@" in intent.payee_name:
+        payid_raw = intent.payee_name.strip().lower()
+        payee_record = find_payee_by_payid_value(DEMO_USER_ID, payid_raw)
+        exists = payee_record is not None
+        if not payee_record:
+            directory_match = lookup_payid_email(payid_raw)
+            append_event(session_id, "PAYEE_LOOKUP", {
+                "payee_name": payid_raw, "exists": False, "by": "email", "directory_match": directory_match,
+            })
+            if not directory_match:
+                return None, False, _blocked_response(session_id, intent, f'"{payid_raw}" is not a registered PayID.')
+            payee_record, blocked = _provision_directory_payee(
+                session_id, intent, directory_match, [directory_match["email"], directory_match["display_number"]],
+            )
+            if blocked:
+                return None, False, blocked
+            exists = True
+        intent.payee_name = payee_record["nickname"]
+        append_event(session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "email"})
+    elif looks_like_payid(intent.payee_name):
+        # The user typed a number, not a name — resolve it as a PayID rather
+        # than a nickname. Real-world PayID networks let you pay any *registered*
+        # PayID immediately; saving the person as a contact is a convenience,
+        # never a precondition. So: saved contacts first (by phone, regardless of
+        # formatting), then the external directory, provisioning a receiver
+        # account on the spot so the payment is still trackable.
+        payid_raw = intent.payee_name
+        payee_record = find_payee_by_phone(DEMO_USER_ID, payid_raw)
+        exists = payee_record is not None
+        if not payee_record:
+            directory_match = lookup_payid(payid_raw)
+            append_event(session_id, "PAYEE_LOOKUP", {
+                "payee_name": payid_raw, "exists": False, "by": "payid", "directory_match": directory_match,
+            })
+            if not directory_match:
+                return None, False, _blocked_response(session_id, intent, f'"{payid_raw}" is not a valid, registered PayID.')
+            payee_record, blocked = _provision_directory_payee(
+                session_id, intent, directory_match, [directory_match["display_number"]],
+            )
+            if blocked:
+                return None, False, blocked
+            exists = True
+
+        intent.payee_name = payee_record["nickname"]
+        append_event(session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": True, "by": "payid"})
+    else:
+        # Resolve the spoken/typed name against saved contacts — exact match first,
+        # then first-name (so "Alice" finds "Alice Wonderland"), then substring.
+        # More than one match at the same tier is genuinely ambiguous: ask rather
+        # than silently guessing which contact was meant.
+        matches = find_payees_by_name(DEMO_USER_ID, intent.payee_name)
+        if len(matches) > 1:
+            # Qualify each candidate with its PayID so two entries sharing a
+            # name (e.g. two "Ava Hill"s with different numbers) are never
+            # shown as indistinguishable duplicates — the user can then say
+            # the full name+number, or go to Setup and mark them as the same
+            # person if that's what they actually are.
+            candidate_labels = [
+                f"{m['nickname']} ({m['phone_number']})" if m.get("phone_number") else m["nickname"]
+                for m in matches
+            ]
+            append_event(session_id, "PAYEE_LOOKUP", {
+                "payee_name": intent.payee_name, "exists": True, "ambiguous": True, "candidates": candidate_labels,
+            })
+            reason = (
+                f"Multiple contacts match \"{intent.payee_name}\": {', '.join(candidate_labels)}. "
+                f"Say the PayID number to pick one, or open Setup and mark them as the same person if they are."
+            )
+            append_event(session_id, "DECISION", {
+                "decision": "CLARIFY", "reason": reason, "required_confirmation": "none", "risk_level": "low",
+            })
+            return None, True, {
+                "ok": False,
+                "intent": intent.model_dump(),
+                "payee_exists": True,
+                "decision": {
+                    "decision": "CLARIFY",
+                    "reason": reason,
+                    "required_confirmation": "none",
+                    "risk_level": "low",
+                },
+                "candidates": candidate_labels,
+                "candidate_payees": [
+                    {"payee_id": m["payee_id"], "nickname": m["nickname"], "phone_number": m.get("phone_number")}
+                    for m in matches
+                ],
+            }
+
+        payee_record = matches[0] if matches else None
+        exists = payee_record is not None
+        if payee_record:
+            # Show/confirm against the resolved contact's full name, not whatever
+            # shorthand the user typed — same as a phone contacts lookup would.
+            intent.payee_name = payee_record["nickname"]
+        append_event(session_id, "PAYEE_LOOKUP", {"payee_name": intent.payee_name, "exists": exists})
+
+    return payee_record, exists, None
 
 
 
@@ -1386,6 +1473,67 @@ def recurring_list_schedules():
     return {"schedules": list_schedules(DEMO_USER_ID)}
 
 
+class RecurringCommandRequest(BaseModel):
+    session_id: str
+    text: str
+
+
+@app.post("/recurring/command")
+def recurring_command(req: RecurringCommandRequest):
+    """
+    Natural-language recurring payment creation for the PayID/P2P rail --
+    "Pay Sam 20 every Friday", "Schedule 15 to 0412 345 678 on the 1st of
+    the month". Delegates amount/payee parsing to parse_recurring_command
+    (itself delegating to intent_parser.parse_text_command for everything
+    but the recurrence phrase), then resolves the payee exactly like
+    /command/text. A brand-new, unsaved payee is refused outright here --
+    unlike a one-off payment, a recurring schedule fires without a
+    confirmation step each time, so it must start from an already-known
+    PayID, never a name nobody's vouched for yet. BPAY recurring schedules
+    can still be created directly via POST /recurring/schedules; natural-
+    language support for that rail isn't wired up yet.
+    """
+    append_event(req.session_id, "RECURRING_COMMAND_RECEIVED", {"text": req.text})
+    parsed = parse_recurring_command(req.text)
+    if not parsed.ok:
+        append_event(req.session_id, "RECURRING_PARSE_FAILED", {"error": parsed.error})
+        return {"ok": False, "error": parsed.error}
+
+    intent = parsed.intent
+    payee_record, exists, early_response = _resolve_payee_for_intent(req.session_id, intent)
+    if early_response is not None:
+        return early_response
+    if not exists or not payee_record or not payee_record.get("stripe_connected_account_id"):
+        reason = f"{intent.payee_name} needs a saved PayID before you can schedule recurring payments to them."
+        decision_info = {"decision": "BLOCK", "reason": reason, "required_confirmation": "none", "risk_level": "high"}
+        append_event(req.session_id, "DECISION", decision_info)
+        return {"ok": False, "intent": intent.model_dump(), "payee_exists": exists, "decision": decision_info}
+
+    amount_cents = int(round(intent.amount * 100))
+    try:
+        schedule_id = create_schedule(
+            DEMO_USER_ID, "payid", payee_record["payee_id"], amount_cents, parsed.cadence, start_at=parsed.next_run_at,
+        )
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    append_event(req.session_id, "RECURRING_SCHEDULE_CREATED", {
+        "schedule_id": schedule_id, "payee_id": payee_record["payee_id"], "amount_cents": amount_cents,
+        "cadence": parsed.cadence, "next_run_at": parsed.next_run_at.isoformat(),
+    })
+    when = f"{parsed.next_run_at.day} {parsed.next_run_at.strftime('%b %Y')}"  # portable day-of-month (no %-d: not supported on Windows)
+    read_back = f"Scheduled: {intent.currency} {intent.amount:.2f} to {intent.payee_name}, {parsed.cadence}, starting {when}."
+    return {
+        "ok": True,
+        "schedule_id": schedule_id,
+        "payee": {"payee_id": payee_record["payee_id"], "nickname": payee_record["nickname"]},
+        "cadence": parsed.cadence,
+        "next_run_at": parsed.next_run_at.isoformat(),
+        "amount_cents": amount_cents,
+        "read_back": read_back,
+    }
+
+
 class ScheduleStatusRequest(BaseModel):
     status: str  # "active" | "paused" | "cancelled"
 
@@ -1403,47 +1551,52 @@ class ProcessDueRequest(BaseModel):
     session_id: str
 
 
-@app.post("/recurring/process_due")
-def recurring_process_due(req: ProcessDueRequest):
+def _process_due_schedules(session_id: str) -> list[dict]:
     """
     Executes every active schedule whose next_run_at has passed. Standing
     authorization was already granted when the schedule was created, so
-    this skips the interactive CONFIRM/PIN step and settles directly --
-    there's no cron daemon built into this app; call this endpoint on a
-    timer (e.g. an external scheduled job) to actually drive recurring
-    payments, or trigger it manually for a demo.
+    this skips the interactive CONFIRM/PIN step and settles directly.
+    Shared by the manual /recurring/process_due endpoint and the in-process
+    APScheduler job (see on_startup) that calls this automatically.
     """
     processed = []
     for sched in due_schedules():
-        append_event(req.session_id, "RECURRING_PAYMENT_TRIGGERED", {
+        append_event(session_id, "RECURRING_PAYMENT_TRIGGERED", {
             "schedule_id": sched["schedule_id"], "rail": sched["payment_rail"], "amount_cents": sched["amount_cents"],
         })
         try:
             if sched["payment_rail"] == "payid":
                 txn_id = create_pending_transaction(
-                    session_id=req.session_id, user_id=DEMO_USER_ID,
+                    session_id=session_id, user_id=DEMO_USER_ID,
                     amount_cents=sched["amount_cents"], currency="AUD", payee_id=sched["target_identifier"],
                 )
                 update_transaction_status(txn_id, "confirmed")
-                result = pay_execute(ExecutePaymentRequest(session_id=req.session_id, txn_id=txn_id))
+                result = pay_execute(ExecutePaymentRequest(session_id=session_id, txn_id=txn_id))
             else:
                 biller = get_saved_biller(sched["target_identifier"])
                 txn_id = create_pending_bpay_transaction(
-                    session_id=req.session_id, user_id=DEMO_USER_ID,
+                    session_id=session_id, user_id=DEMO_USER_ID,
                     amount_cents=sched["amount_cents"], currency="AUD",
                     biller_code=biller["biller_code"], crn=biller["crn"],
                 )
                 update_transaction_status(txn_id, "confirmed")
-                result = bpay_execute(ExecuteBpayRequest(session_id=req.session_id, txn_id=txn_id))
+                result = bpay_execute(ExecuteBpayRequest(session_id=session_id, txn_id=txn_id))
         except Exception as e:
-            append_event(req.session_id, "RECURRING_PAYMENT_FAILED", {"schedule_id": sched["schedule_id"], "error": str(e)})
+            append_event(session_id, "RECURRING_PAYMENT_FAILED", {"schedule_id": sched["schedule_id"], "error": str(e)})
             processed.append({"schedule_id": sched["schedule_id"], "ok": False, "error": str(e)})
             continue
 
         advance_schedule(sched["schedule_id"], sched["cadence"])
         processed.append({"schedule_id": sched["schedule_id"], "txn_id": txn_id, "ok": result.get("ok", False)})
 
-    return {"ok": True, "processed": processed}
+    return processed
+
+
+@app.post("/recurring/process_due")
+def recurring_process_due(req: ProcessDueRequest):
+    """Manual trigger for a demo, or for an external caller without the
+    in-process scheduler (see on_startup) -- same underlying logic either way."""
+    return {"ok": True, "processed": _process_due_schedules(req.session_id)}
 
 
 # Serve the frontend from this same FastAPI process/origin — one deployed

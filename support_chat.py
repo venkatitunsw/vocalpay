@@ -14,7 +14,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 import db
 from db import get_conn
-from payees_repo import find_payees_by_name
+from payees_repo import find_payees_by_name, get_payee
 from transactions_repo import list_recent_transactions, get_transaction
 from stripe_service import get_account_balance
 
@@ -64,6 +64,7 @@ ROUTE_KEYWORDS = {
     "account": (
         "contact", "contacts", "payid", "pay id", "policy", "rule", "rules",
         "limit", "cap", "pin", "confirm", "how does", "how do i", "what happens if",
+        "recurring", "scheduled payment", "schedule", "every friday", "every week", "every month",
     ),
     "transactions": (
         "transaction", "transactions", "payment history", "last payment", "last transfer",
@@ -78,12 +79,14 @@ ROUTE_KEYWORDS = {
 ROUTE_NAMES = ("account", "transactions", "bills", "general")
 
 ACCOUNT_SYSTEM_PROMPT = (
-    "You are VocalPay's account specialist. You know the user's saved contacts and the app's payment "
-    "rules (what gets blocked, what needs a PIN, the amount cap) -- answer those questions using your "
-    "tools, never guessing or inventing a name or PayID. You cannot move money yourself; if asked to pay "
-    "or send money, tell the user to type a payment command directly in the chat (e.g. 'Pay 12 to John') "
-    "-- real transfers must go through the app's own confirmation/PIN flow, which you don't have access "
-    "to. Keep answers short and conversational."
+    "You are VocalPay's account specialist. You know the user's saved contacts, the app's payment "
+    "rules (what gets blocked, what needs a PIN, the amount cap), and their recurring/scheduled "
+    "payments -- answer those questions using your tools, never guessing or inventing a name, PayID, or "
+    "schedule. You cannot move money yourself, and you cannot create a recurring schedule either; if "
+    "asked to pay, send money, or set up a recurring payment, tell the user to say it directly in the "
+    "chat (e.g. 'Pay 12 to John', or 'Pay Sam 20 every Friday' to schedule one) -- real transfers and new "
+    "schedules must go through the app's own confirmation flow, which you don't have access to. Keep "
+    "answers short and conversational."
 )
 TRANSACTIONS_SYSTEM_PROMPT = (
     "You are VocalPay's transactions specialist. You look up the user's payment history, a specific "
@@ -286,7 +289,25 @@ def _account_tools():
             "attempts locks that payment."
         )
 
-    return [list_contacts, explain_payment_policy]
+    @tool
+    def list_recurring_schedules() -> str:
+        """List the user's recurring/scheduled payments: amount, cadence, next run date, and status."""
+        from recurring_repo import list_schedules
+        rows = list_schedules(DEMO_USER_ID)
+        if not rows:
+            return "No recurring payments scheduled."
+        lines = []
+        for r in rows:
+            amount = r["amount_cents"] / 100
+            target = get_payee(r["target_identifier"]) if r["payment_rail"] == "payid" else None
+            target_label = target["nickname"] if target else r["target_identifier"]
+            lines.append(
+                f"- AUD {amount:.2f} to {target_label} ({r['payment_rail']}), {r['cadence']}, "
+                f"next on {r['next_run_at'][:10]}, {r['status']} (schedule_id {r['schedule_id']})"
+            )
+        return "\n".join(lines)
+
+    return [list_contacts, explain_payment_policy, list_recurring_schedules]
 
 
 def _transactions_tools():

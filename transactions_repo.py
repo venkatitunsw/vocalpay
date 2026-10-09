@@ -152,3 +152,32 @@ def set_receiver_evidence(
         conn.commit()
     finally:
         conn.close()
+
+
+def find_recent_duplicate(user_id: str, payee_id: str, amount_cents: int, within_minutes: int = 5) -> dict | None:
+    """
+    The most recent payment to this exact payee for this exact amount, if one
+    was created within the last `within_minutes` -- regardless of its status,
+    since even a since-failed attempt means the user just tried this and it's
+    worth asking "did you mean to send it again?" rather than silently
+    letting a second identical payment through. Used as a safety prompt
+    (CLARIFY), never a hard block -- re-sending the same amount to the same
+    person twice in a row is unusual but not inherently wrong (a genuine
+    split bill, a correction, etc.).
+    """
+    if not payee_id:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT txn_id, status, created_at FROM transactions
+            WHERE user_id=? AND payee_id=? AND amount_cents=? AND created_at>=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (user_id, payee_id, amount_cents, cutoff),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()

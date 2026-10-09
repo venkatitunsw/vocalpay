@@ -398,7 +398,13 @@ composer.addEventListener("submit", async (e) => {
       }
     }
 
-    if (/\bbpay\b|\bbiller\s*code\b/i.test(text)) {
+    if (RECURRING_HINT_RE.test(text)) {
+      const res = await api("/recurring/command", {
+        method: "POST",
+        body: { session_id: state.sessionId, text },
+      });
+      handleRecurringCommandResponse(res);
+    } else if (/\bbpay\b|\bbiller\s*code\b/i.test(text)) {
       const res = await api("/bpay/command", {
         method: "POST",
         body: { session_id: state.sessionId, text },
@@ -431,6 +437,18 @@ function focusPendingCardOrComposer() {
 // --- Service provider flow (tried first when the text names a bill or provider) ---
 
 const SERVICE_HINT_RE = /\b(bill|invoice|top[- ]?up|telstra|agl|opal|sydney water|dr smith)\b/i;
+// Mirrors recurring_parser.RECURRENCE_RE (backend) closely enough to decide
+// routing; the backend does the actual cadence parsing.
+const RECURRING_HINT_RE = /\b(?:every|each)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|fortnight|two\s+weeks|month)\b|\bweekly\b|\bfortnightly\b|\bmonthly\b|\bon\s+the\s+\d{1,2}(?:st|nd|rd|th)?\s*(?:of\s+(?:every|each|the)\s+month)?\b/i;
+
+async function handleRecurringCommandResponse(res) {
+  if (!res.ok) {
+    const reason = res.decision ? res.decision.reason : res.error || "Could not understand that recurring payment.";
+    appendErrorBubble(reason);
+    return;
+  }
+  appendAssistantBubble(res.read_back, { sensitive: true });
+}
 
 // Colour per payment rail: emerald = peer to peer, indigo = service provider, amber = BPAY.
 const RAIL_STYLE = {

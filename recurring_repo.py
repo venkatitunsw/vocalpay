@@ -1,9 +1,10 @@
+import calendar
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
 from db import get_conn
 
-_CADENCE_DAYS = {"weekly": 7, "fortnightly": 14, "monthly": 30}
+_CADENCE_DAYS = {"weekly": 7, "fortnightly": 14}  # "monthly" is calendar math -- see _advance_monthly
 
 
 def create_schedule(
@@ -14,8 +15,9 @@ def create_schedule(
     cadence: str,
     start_at: datetime | None = None,
 ) -> str:
-    if cadence not in _CADENCE_DAYS:
-        raise ValueError(f"Unknown cadence '{cadence}' -- expected one of {sorted(_CADENCE_DAYS)}")
+    valid_cadences = sorted(_CADENCE_DAYS) + ["monthly"]
+    if cadence not in valid_cadences:
+        raise ValueError(f"Unknown cadence '{cadence}' -- expected one of {valid_cadences}")
     if payment_rail not in ("payid", "bpay"):
         raise ValueError(f"Unknown payment_rail '{payment_rail}' -- expected 'payid' or 'bpay'")
 
@@ -73,12 +75,29 @@ def due_schedules(as_of: datetime | None = None) -> list[dict]:
         conn.close()
 
 
+def _advance_monthly(from_time: datetime) -> datetime:
+    """A calendar month forward, clamped to the target month's last day (e.g.
+    Jan 31 -> Feb 28/29) -- a flat +30 days drifts earlier every cycle and
+    eventually crosses the day it started on."""
+    year, month, day = from_time.year, from_time.month, from_time.day
+    month += 1
+    if month > 12:
+        month, year = 1, year + 1
+    last_day = calendar.monthrange(year, month)[1]
+    return from_time.replace(year=year, month=month, day=min(day, last_day))
+
+
 def advance_schedule(schedule_id: str, cadence: str, from_time: datetime | None = None) -> str:
     """Pushes next_run_at forward by one cadence period from `from_time`
     (defaulting to now) -- called once a due schedule's payment has actually
     been created, so a schedule is never silently skipped or double-fired."""
-    days = _CADENCE_DAYS[cadence]
-    next_run_at = ((from_time or datetime.now(timezone.utc)) + timedelta(days=days)).isoformat()
+    base = from_time or datetime.now(timezone.utc)
+    if cadence == "monthly":
+        next_run_at = _advance_monthly(base).isoformat()
+    elif cadence in _CADENCE_DAYS:
+        next_run_at = (base + timedelta(days=_CADENCE_DAYS[cadence])).isoformat()
+    else:
+        raise ValueError(f"Unknown cadence '{cadence}' -- expected one of {sorted(_CADENCE_DAYS) + ['monthly']}")
     conn = get_conn()
     try:
         conn.execute("UPDATE recurring_schedules SET next_run_at=? WHERE schedule_id=?", (next_run_at, schedule_id))

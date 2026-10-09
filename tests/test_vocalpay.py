@@ -1639,3 +1639,155 @@ def test_bills_tools_list_seeded_service_bills_and_billers(client):
 
     saved_text = tools["list_my_bpay_billers"].invoke({})
     assert "No saved BPAY billers yet." in saved_text
+
+
+# --- Recurring payments: NL parsing --------------------------------------------
+
+def test_recurring_parser_every_weekday():
+    from recurring_parser import parse_recurring_command
+    now = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)  # a Saturday
+    result = parse_recurring_command("Pay Sam 15 every Friday", now=now)
+    assert result.ok
+    assert result.intent.amount == 15.0
+    assert result.intent.payee_name == "Sam"
+    assert result.cadence == "weekly"
+    assert result.next_run_at.strftime("%A") == "Friday"
+    assert result.next_run_at > now
+
+
+def test_recurring_parser_schedule_verb_and_on_the_nth():
+    from recurring_parser import parse_recurring_command
+    now = datetime(2026, 10, 10, 9, 0, tzinfo=timezone.utc)
+    result = parse_recurring_command("Schedule 50 to Sam on the 1st of the month", now=now)
+    assert result.ok
+    assert result.intent.amount == 50.0
+    assert result.intent.payee_name == "Sam"
+    assert result.cadence == "monthly"
+    assert result.next_run_at.day == 1
+    assert result.next_run_at > now
+
+
+def test_recurring_parser_monthly_clamps_short_months():
+    from recurring_parser import parse_recurring_command
+    now = datetime(2026, 1, 31, 9, 0, tzinfo=timezone.utc)
+    result = parse_recurring_command("Pay Sam 20 every month", now=now)
+    assert result.ok
+    # Jan 31 -> Feb 28 (2026 is not a leap year), not Mar 3 (what +30 days would give)
+    assert result.next_run_at.month == 2
+    assert result.next_run_at.day == 28
+
+
+def test_recurring_parser_rejects_non_recurring_text():
+    from recurring_parser import parse_recurring_command, is_recurring_command
+    assert not is_recurring_command("Pay 12 to John")
+    result = parse_recurring_command("Pay 12 to John")
+    assert not result.ok
+
+
+def test_recurring_repo_advance_monthly_calendar_correct():
+    from recurring_repo import _advance_monthly
+    assert _advance_monthly(datetime(2026, 1, 31, tzinfo=timezone.utc)) == datetime(2026, 2, 28, tzinfo=timezone.utc)
+    assert _advance_monthly(datetime(2026, 2, 15, tzinfo=timezone.utc)) == datetime(2026, 3, 15, tzinfo=timezone.utc)
+    assert _advance_monthly(datetime(2026, 12, 10, tzinfo=timezone.utc)) == datetime(2027, 1, 10, tzinfo=timezone.utc)
+
+
+# --- Recurring payments: /recurring/command endpoint ---------------------------
+
+def test_recurring_command_creates_schedule_for_known_contact(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    session_id = _new_session(client)
+    _add_contact(client, "Sam")
+
+    r = client.post("/recurring/command", json={"session_id": session_id, "text": "Pay Sam 15 every Friday"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["cadence"] == "weekly"
+    assert body["amount_cents"] == 1500
+    assert "Sam" in body["read_back"]
+
+    schedules = client.get("/recurring/schedules").json()["schedules"]
+    assert any(s["schedule_id"] == body["schedule_id"] for s in schedules)
+
+
+def test_recurring_command_blocks_unknown_payee(client):
+    session_id = _new_session(client)
+    r = client.post("/recurring/command", json={"session_id": session_id, "text": "Pay Nobody 15 every Friday"})
+    body = r.json()
+    assert body["ok"] is False
+    assert body["decision"]["decision"] == "BLOCK"
+
+
+def test_recurring_command_rejects_non_recurring_text(client):
+    session_id = _new_session(client)
+    r = client.post("/recurring/command", json={"session_id": session_id, "text": "Pay 12 to John"})
+    body = r.json()
+    assert body["ok"] is False
+    assert "error" in body
+
+
+# --- Duplicate-payment guardrail ------------------------------------------------
+
+def test_duplicate_payment_within_five_minutes_is_clarified(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    monkeypatch.setattr(main, "create_payment_intent", _fake_payment_intent)
+    session_id = _new_session(client)
+    _add_contact(client, "Dana")
+    _add_default_payment_method(client)
+
+    def _pay(session_id, text):
+        r = client.post("/command/text", json={"session_id": session_id, "text": text})
+        body = r.json()
+        assert body["ok"] is True, body
+        conf_id = body["confirmation"]["confirmation_id"]
+        client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": conf_id, "phrase": "CONFIRM"})
+        client.post("/pay/execute", json={"session_id": session_id, "txn_id": body["txn_id"]})
+
+    _pay(session_id, "Pay 12 to Dana")
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 12 to Dana"})
+    body = r.json()
+    assert body["ok"] is False
+    assert body["decision"]["decision"] == "CLARIFY"
+    assert "again" in body["decision"]["reason"]
+
+    # The bypass word lets a genuine second payment of the same amount through.
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 12 to Dana again"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["decision"]["decision"] == "PROCEED"
+
+
+def test_find_recent_duplicate_ignores_different_amount(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    monkeypatch.setattr(main, "create_payment_intent", _fake_payment_intent)
+    session_id = _new_session(client)
+    _add_contact(client, "Eve")
+    _add_default_payment_method(client)
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 10 to Eve"})
+    body = r.json()
+    conf_id = body["confirmation"]["confirmation_id"]
+    client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": conf_id, "phrase": "CONFIRM"})
+    client.post("/pay/execute", json={"session_id": session_id, "txn_id": body["txn_id"]})
+
+    # A different amount to the same person isn't a duplicate.
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 11 to Eve"})
+    assert r.json()["decision"]["decision"] == "PROCEED"
+
+
+# --- Multi-agent support chat: recurring schedules tool -------------------------
+
+def test_account_agent_has_recurring_schedules_tool(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    tools = {t.name: t for t in support_chat._account_tools()}
+    assert "No recurring payments scheduled." in tools["list_recurring_schedules"].invoke({})
+
+    r = client.post("/payees/add_contact", json={"nickname": "Fay", "phone_number": "0400 222 333"})
+    payee_id = r.json()["payee_id"]
+    client.post(
+        "/recurring/schedules",
+        json={"payment_rail": "payid", "target_identifier": payee_id, "amount_cents": 2500, "cadence": "weekly"},
+    )
+    listing = tools["list_recurring_schedules"].invoke({})
+    assert "Fay" in listing
+    assert "AUD 25.00" in listing
