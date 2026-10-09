@@ -1060,7 +1060,19 @@ function renderPasskeyList(credentials) {
     .join("");
 }
 
-if (!window.PublicKeyCredential) {
+// Android's WebView (what the offline app runs in) typically has no
+// window.PublicKeyCredential at all, so the button below was getting
+// disabled with only a `title` tooltip as explanation -- invisible on a
+// touchscreen, since tapping a disabled button does nothing and there's no
+// hover to show a tooltip. Passkeys also can't work offline regardless (no
+// server to issue/verify a WebAuthn challenge), so in the offline app this
+// is shown as visible, static feedback instead of a silently-dead button.
+if (window.VPOffline) {
+  registerPasskeyBtn.disabled = true;
+  registerPasskeyBtn.title = "Passkeys aren't available in the offline app";
+  passkeyFeedback.textContent = "Passkeys aren't available offline — PIN step-ups still work for larger payments.";
+  passkeyFeedback.className = "text-[11px] h-4 mt-1 text-slate-400";
+} else if (!window.PublicKeyCredential) {
   registerPasskeyBtn.disabled = true;
   registerPasskeyBtn.title = "Passkeys aren't supported in this browser";
 }
