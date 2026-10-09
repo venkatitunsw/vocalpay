@@ -874,5 +874,76 @@
     return { ok: false, error: `Offline app has no handler for ${method} ${path}` };
   }
 
-  window.VPOffline = { handle, ready, DEMO_USER_ID };
+  // --- threads & messages (per-contact chat history, app.js's doing) ---------
+  // A thread_key is "payee:<payee_id>", "biller:<biller_code>", or the
+  // always-present "general" thread (BPAY-by-code, support, anything not
+  // tied to one contact). This layer only persists and reads back messages
+  // app.js already rendered -- it has no say in parsing, routing or
+  // decisions, same separation as the rest of this file from main.py.
+  const GENERAL_THREAD = "general";
+  const payeeThreadKey = (payeeId) => `payee:${payeeId}`;
+  const billerThreadKey = (billerCode) => `biller:${billerCode}`;
+
+  async function recordMessage(threadKey, role, text) {
+    const message_id = uuid();
+    const created_at = nowIso();
+    await DB.put("messages", { message_id, thread_key: threadKey, role, text, created_at });
+    await DB.put("threads", { thread_key: threadKey, last_message_at: created_at, last_message_preview: (text || "").slice(0, 140) });
+    return message_id;
+  }
+
+  async function listMessages(threadKey) {
+    const rows = await DB.getAllByIndex("messages", "thread_key", threadKey);
+    return rows.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
+  }
+
+  async function listThreads() {
+    const [threadRows, payees] = await Promise.all([DB.getAll("threads"), DB.getAllByIndex("payees", "user_id", DEMO_USER_ID)]);
+    const byKey = new Map(threadRows.map((t) => [t.thread_key, t]));
+
+    // Every saved contact gets an entry even with zero messages yet, so the
+    // thread list doubles as "who can I start a chat with" -- same as
+    // opening a fresh conversation with a phone contact.
+    const contactThreads = payees
+      .filter((p) => p.is_contact)
+      .map((p) => {
+        const key = payeeThreadKey(p.payee_id);
+        const t = byKey.get(key);
+        return {
+          thread_key: key, label: p.nickname, payee_id: p.payee_id,
+          last_message_at: t ? t.last_message_at : null, last_message_preview: t ? t.last_message_preview : "",
+        };
+      });
+
+    const billerThreads = [];
+    for (const [key, t] of byKey) {
+      if (!key.startsWith("biller:")) continue;
+      const biller = await lookupBiller(key.slice(7));
+      billerThreads.push({
+        thread_key: key, label: biller ? biller.biller_name : key, biller_code: key.slice(7),
+        last_message_at: t.last_message_at, last_message_preview: t.last_message_preview,
+      });
+    }
+
+    const general = byKey.get(GENERAL_THREAD);
+    const generalThread = {
+      thread_key: GENERAL_THREAD, label: "General",
+      last_message_at: general ? general.last_message_at : null, last_message_preview: general ? general.last_message_preview : "",
+    };
+
+    const all = [generalThread, ...contactThreads, ...billerThreads];
+    // No-messages-yet threads sort after everything with real history, most recent first.
+    all.sort((a, b) => {
+      if (!a.last_message_at && !b.last_message_at) return a.label.localeCompare(b.label);
+      if (!a.last_message_at) return 1;
+      if (!b.last_message_at) return -1;
+      return a.last_message_at < b.last_message_at ? 1 : -1;
+    });
+    return all;
+  }
+
+  window.VPOffline = {
+    handle, ready, DEMO_USER_ID,
+    GENERAL_THREAD, payeeThreadKey, billerThreadKey, recordMessage, listMessages, listThreads,
+  };
 })();

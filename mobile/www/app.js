@@ -24,11 +24,23 @@ const state = {
   // below) — lets a bare reply like "30" or "alice" complete that specific
   // question instead of being sent to the chatbot with no context.
   pendingSlotFill: null, // { type: "missing_amount", target } | { type: "missing_target", amount } | null
+  // Offline-app only (window.VPOffline): which chat thread is currently
+  // open -- "general" (BPAY/support/anything not tied to one contact) or
+  // "payee:<id>"/"biller:<code>". Every bubble appended while a thread is
+  // open is persisted under this key; see recordBubble() below and
+  // offline/offline-engine.js's listThreads/listMessages.
+  activeThreadKey: window.VPOffline ? window.VPOffline.GENERAL_THREAD : null,
 };
 
 const feed = document.getElementById("feed");
 const sessionBadge = document.getElementById("session-badge");
 const composer = document.getElementById("composer");
+const composerFooter = document.getElementById("composer-footer");
+const threadListView = document.getElementById("thread-list-view");
+const threadList = document.getElementById("thread-list");
+const threadBackBtn = document.getElementById("thread-back-btn");
+const headerTitle = document.getElementById("header-title");
+const headerSubtitle = document.getElementById("header-subtitle");
 const textInput = document.getElementById("text-input");
 const sendBtn = document.getElementById("send-btn");
 const setupToggle = document.getElementById("setup-toggle");
@@ -86,7 +98,27 @@ function scrollToBottom() {
   feed.scrollTop = feed.scrollHeight;
 }
 
-function appendUserBubble(text) {
+// Persists one chat bubble into the currently open thread (offline app
+// only -- a no-op for the server build, which has no window.VPOffline and
+// no thread concept). `replay: true` is set when re-rendering a thread's
+// stored history on open, which must never re-persist what it just read.
+function recordBubble(role, text, opts = {}) {
+  if (!window.VPOffline || opts.replay) return;
+  window.VPOffline.recordMessage(state.activeThreadKey, role, text).catch(() => {});
+}
+
+// A confirm/pay outcome also lands in the payment's own contact/biller
+// thread (card.dataset.threadKey, set in renderConfirmationCard) when
+// that's not already where the user is -- see the comment there.
+function mirrorBubble(card, role, text) {
+  if (!window.VPOffline) return;
+  const key = card.dataset.threadKey;
+  if (key && key !== state.activeThreadKey) {
+    window.VPOffline.recordMessage(key, role, text).catch(() => {});
+  }
+}
+
+function appendUserBubble(text, opts = {}) {
   const el = document.createElement("div");
   el.className = "flex justify-end";
   el.innerHTML = `
@@ -95,6 +127,7 @@ function appendUserBubble(text) {
     </div>`;
   feed.appendChild(el);
   scrollToBottom();
+  recordBubble("user", text, opts);
 }
 
 function appendAssistantBubble(text, opts = {}) {
@@ -105,22 +138,24 @@ function appendAssistantBubble(text, opts = {}) {
     <div class="max-w-[80%] bg-slate-800 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm">
       ${body}
     </div>`;
-  VocalPrivacy.speak(text);
+  if (!opts.replay) VocalPrivacy.speak(text);
   feed.appendChild(el);
   scrollToBottom();
+  recordBubble("assistant", text, opts);
   return el;
 }
 
-function appendErrorBubble(text) {
+function appendErrorBubble(text, opts = {}) {
   const el = document.createElement("div");
   el.className = "flex justify-start";
   el.innerHTML = `
     <div class="max-w-[80%] bg-rose-950 border border-rose-800 text-rose-200 rounded-2xl rounded-bl-sm px-4 py-2.5 text-sm">
       ${escapeHtml(text)}
     </div>`;
-  VocalPrivacy.speak(text);
+  if (!opts.replay) VocalPrivacy.speak(text);
   feed.appendChild(el);
   scrollToBottom();
+  recordBubble("error", text, opts);
   return el;
 }
 
@@ -146,6 +181,101 @@ function escapeHtml(str) {
 function money(amount, currency) {
   return VocalPrivacy.sens(`${currency} ${Number(amount).toFixed(2)}`);
 }
+
+// --- Threads (offline app only): one chat per contact, WhatsApp-style ---------
+// The landing view is the thread list; opening a thread shows that
+// contact's (or "General"'s) persisted history and reveals the composer.
+// No-op entirely when window.VPOffline is absent (there's no server build
+// of this -- threads only make sense against the on-device history the
+// offline app persists; see offline/offline-engine.js's listThreads).
+
+function timeAgoShort(iso) {
+  if (!iso) return "";
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+async function renderThreadList() {
+  if (!window.VPOffline) return;
+  const threads = await window.VPOffline.listThreads();
+  threadList.innerHTML = threads
+    .map((t) => {
+      const initial = escapeHtml((t.label || "?").trim().charAt(0).toUpperCase() || "?");
+      const preview = t.last_message_preview
+        ? VocalPrivacy.sens(escapeHtml(t.last_message_preview))
+        : '<span class="text-slate-500">No messages yet — tap to say hello</span>';
+      const time = t.last_message_at
+        ? `<span class="text-[11px] text-slate-500 shrink-0">${timeAgoShort(t.last_message_at)}</span>`
+        : "";
+      return `
+        <button type="button" class="thread-item w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition"
+          data-thread-key="${escapeHtml(t.thread_key)}" data-thread-label="${escapeHtml(t.label)}">
+          <div class="h-10 w-10 rounded-full bg-slate-700 flex items-center justify-center font-semibold text-sm shrink-0">${initial}</div>
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium truncate">${escapeHtml(t.label)}</div>
+            <div class="text-xs text-slate-400 truncate">${preview}</div>
+          </div>
+          ${time}
+        </button>`;
+    })
+    .join("");
+}
+
+threadList.addEventListener("click", (e) => {
+  const btn = e.target.closest(".thread-item");
+  if (!btn) return;
+  openThread(btn.dataset.threadKey, btn.dataset.threadLabel);
+});
+
+async function openThread(threadKey, label) {
+  state.activeThreadKey = threadKey;
+  threadListView.classList.add("hidden");
+  feed.classList.remove("hidden");
+  composerFooter.classList.remove("hidden");
+  threadBackBtn.classList.remove("hidden");
+  threadBackBtn.classList.add("flex");
+  headerTitle.textContent = label;
+  headerSubtitle.textContent =
+    threadKey === window.VPOffline.GENERAL_THREAD ? "BPAY, support & everything else" : "voice-ready payment assistant";
+
+  feed.innerHTML = "";
+  const messages = await window.VPOffline.listMessages(threadKey);
+  if (!messages.length) {
+    appendAssistantBubble(
+      threadKey === window.VPOffline.GENERAL_THREAD
+        ? "Ask about BPAY, your bills, or anything that's not tied to one contact."
+        : `Say a payment to start — e.g. "Pay 12 to ${label}".`,
+      { replay: true }
+    );
+  } else {
+    for (const m of messages) {
+      if (m.role === "user") appendUserBubble(m.text, { replay: true });
+      else if (m.role === "error") appendErrorBubble(m.text, { replay: true });
+      else appendAssistantBubble(m.text, { replay: true });
+    }
+  }
+  textInput.focus();
+}
+
+function closeThread() {
+  state.activeThreadKey = window.VPOffline.GENERAL_THREAD;
+  feed.classList.add("hidden");
+  composerFooter.classList.add("hidden");
+  threadBackBtn.classList.add("hidden");
+  threadBackBtn.classList.remove("flex");
+  headerTitle.textContent = "VocalPay";
+  headerSubtitle.textContent = "voice-ready payment assistant";
+  threadListView.classList.remove("hidden");
+  renderThreadList();
+}
+
+threadBackBtn.addEventListener("click", closeThread);
 
 // --- WebAuthn/passkey helpers --------------------------------------------------
 // py_webauthn's options_to_json() encodes binary fields (challenge, user.id,
@@ -233,16 +363,30 @@ async function authenticateWithPasskey(confirmationId) {
 // --- Session lifecycle --------------------------------------------------------
 
 async function initSession() {
+  const welcomeText =
+    "Hi, I'm VocalPay. Tell me a payment to make — e.g. “Pay 12 to John for dinner”, or pay a PayID directly, e.g. “Pay 12 to 0412 345 678”. You can also just ask me things, like “what was my last payment?” or “who are my contacts?”";
   try {
     const res = await api("/session/new", { method: "POST" });
     state.sessionId = res.session_id;
     sessionBadge.textContent = state.sessionId.slice(0, 8);
     sessionBadge.title = state.sessionId;
-    appendAssistantBubble(
-      "Hi, I'm VocalPay. Tell me a payment to make — e.g. “Pay 12 to John for dinner”, or pay a PayID directly, e.g. “Pay 12 to 0412 345 678”. You can also just ask me things, like “what was my last payment?” or “who are my contacts?”"
-    );
+
+    if (window.VPOffline) {
+      // Thread-list is the landing view (#feed starts hidden) -- seed the
+      // General thread's history once instead of rendering straight in.
+      const existing = await window.VPOffline.listMessages(window.VPOffline.GENERAL_THREAD);
+      if (!existing.length) {
+        await window.VPOffline.recordMessage(window.VPOffline.GENERAL_THREAD, "assistant", welcomeText);
+      }
+      await renderThreadList();
+    } else {
+      appendAssistantBubble(welcomeText);
+    }
   } catch (err) {
     sessionBadge.textContent = "offline";
+    threadListView.classList.add("hidden");
+    feed.classList.remove("hidden");
+    composerFooter.classList.remove("hidden");
     appendErrorBubble(`Couldn't reach the backend at ${API_BASE}. Is uvicorn running? (${err.message})`);
   }
 }
@@ -646,6 +790,25 @@ function renderConfirmationCard(cmdRes, opts = {}) {
     cardEl: card,
   };
 
+  // A payment started from the general view still belongs in that
+  // contact's (or BPAY biller's) own thread, same as paying someone from
+  // a phone's main dial pad still lands in their message thread -- not
+  // just wherever the composer happened to be. card.dataset.threadKey
+  // (rather than state.activeDraft, which is cleared once confirmed)
+  // outlives confirmation/execution so later outcomes can still mirror
+  // into the right thread -- see mirrorBubble().
+  if (window.VPOffline) {
+    let draftThreadKey = null;
+    if (payee) draftThreadKey = window.VPOffline.payeeThreadKey(payee.payee_id);
+    else if (rail === "bpay" && cmdRes.biller) draftThreadKey = window.VPOffline.billerThreadKey(cmdRes.biller.biller_code);
+    if (draftThreadKey) {
+      card.dataset.threadKey = draftThreadKey;
+      if (draftThreadKey !== state.activeThreadKey && cmdRes.read_back) {
+        window.VPOffline.recordMessage(draftThreadKey, "assistant", cmdRes.read_back).catch(() => {});
+      }
+    }
+  }
+
   const header = `
     <div class="flex items-center justify-between">
       <span class="text-xs uppercase tracking-wide ${railStyle.text}">${railStyle.label}</span>
@@ -857,6 +1020,8 @@ async function handleConfirmResult(card, form, feedback, res, txnId, executeEndp
   confirmedNotice.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>Confirmed`;
   form.replaceWith(confirmedNotice);
   VocalPrivacy.speak("Confirmed. Ready to pay.");
+  recordBubble("assistant", "Confirmed. Ready to pay.");
+  mirrorBubble(card, "assistant", "Confirmed. Ready to pay.");
   card.querySelectorAll(".use-passkey-btn").forEach((el) => el.remove());
 
   // Once confirmed, a correction/cancel typed in the composer no longer has
@@ -896,6 +1061,8 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
           <div class="text-[10px] text-slate-400">${escapeHtml(res.note)}</div>
         </div>`;
       VocalPrivacy.speak(`${railLabel} payment ${res.final_status}.`);
+      recordBubble("assistant", `${railLabel} payment ${res.final_status}. Reference ${res.simulated_reference}.`);
+      mirrorBubble(card, "assistant", `${railLabel} payment ${res.final_status}. Reference ${res.simulated_reference}.`);
     } else if (res.ok) {
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-2">
@@ -906,6 +1073,8 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
           ${renderReceiverEvidence(res.receiver_evidence)}
         </div>`;
       VocalPrivacy.speak(`Payment ${res.final_status}.`);
+      recordBubble("assistant", `Payment ${res.final_status}. ${res.stripe_payment_intent_id}`);
+      mirrorBubble(card, "assistant", `Payment ${res.final_status}. ${res.stripe_payment_intent_id}`);
     } else {
       payBtn.outerHTML = `
         <div class="bg-rose-950 border border-rose-800 rounded-lg px-3 py-2.5 text-sm">
@@ -913,10 +1082,14 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
           ${res.details ? `<div class="text-[11px] text-rose-400/80 mt-0.5">${escapeHtml(res.details)}</div>` : ""}
         </div>`;
       VocalPrivacy.speak(res.error || "Payment failed.");
+      recordBubble("error", res.error || "Payment failed.");
+      mirrorBubble(card, "error", res.error || "Payment failed.");
     }
   } catch (err) {
     payBtn.outerHTML = `<div class="bg-rose-950 border border-rose-800 rounded-lg px-3 py-2.5 text-sm text-rose-300">Request failed: ${escapeHtml(err.message)}</div>`;
     VocalPrivacy.speak("Payment request failed.");
+    recordBubble("error", `Request failed: ${err.message}`);
+    mirrorBubble(card, "error", `Request failed: ${err.message}`);
   } finally {
     refreshAuditIfOpen();
   }
@@ -1128,6 +1301,10 @@ async function loadPayees() {
   try {
     const res = await api("/payees");
     renderPayeeList(res.payees);
+    // The Setup drawer is an overlay, not a navigation -- a contact added
+    // or imported there wouldn't otherwise show up as a thread until some
+    // unrelated screen change happened to re-render the list.
+    if (window.VPOffline && !threadListView.classList.contains("hidden")) renderThreadList();
   } catch (err) {
     payeeList.innerHTML = `<p class="text-rose-400 text-xs">Failed to load: ${escapeHtml(err.message)}</p>`;
   }

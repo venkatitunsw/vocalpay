@@ -5,7 +5,12 @@
 // everything in offline-engine.js reads and writes through here, and
 // nothing ever reaches a network.
 const DB_NAME = "vocalpay";
-const DB_VERSION = 1;
+// v2 adds `messages` and `threads` (see below) -- purely additive, so
+// onupgradeneeded below runs against an *existing* database for anyone who
+// already has v1 installed: every store they already have (payees,
+// transactions, the directory, ...) is left completely alone, and only the
+// two new stores get created. Nobody's local data is wiped by this upgrade.
+const DB_VERSION = 2;
 
 const STORES = {
   users: { key: "user_id" },
@@ -18,6 +23,15 @@ const STORES = {
   payid_directory: { key: "phone_number", indexes: ["email"] },
   bpay_directory: { key: "biller_code" },
   saved_bpay_billers: { key: "biller_id", indexes: ["user_id"] },
+  // One row per chat bubble, scoped to a thread (a payee_id, a biller_code,
+  // or the "general" fallback thread) -- see offline-engine.js's thread
+  // helpers. `created_at` is indexed so a thread's history can be read back
+  // in order without loading every message in the store.
+  messages: { key: "message_id", indexes: ["thread_key", "created_at"] },
+  // One row per thread: its own key, a display label, and a denormalized
+  // last-message preview/timestamp so the thread list can render without
+  // re-scanning `messages` on every open.
+  threads: { key: "thread_key", indexes: ["last_message_at"] },
 };
 
 let _dbPromise = null;
