@@ -1791,3 +1791,116 @@ def test_account_agent_has_recurring_schedules_tool(client, monkeypatch):
     listing = tools["list_recurring_schedules"].invoke({})
     assert "Fay" in listing
     assert "AUD 25.00" in listing
+
+
+# --- Financial slang normalization -----------------------------------------
+
+def test_financial_slang_bare_article_forms():
+    from financial_slang import normalize_financial_slang
+    assert normalize_financial_slang("Pay Sam a fiver") == "Pay Sam 5"
+    assert normalize_financial_slang("Send Alice a tenner for lunch") == "Send Alice 10 for lunch"
+    assert normalize_financial_slang("Pay Sam a grand") == "Pay Sam 1000"
+    assert normalize_financial_slang("Pay Sam a ton") == "Pay Sam 100"
+    assert normalize_financial_slang("Pay Sam a buck") == "Pay Sam 1"
+
+
+def test_financial_slang_bare_without_article():
+    from financial_slang import normalize_financial_slang
+    # Voice transcription commonly drops "a" -- must still resolve, and
+    # must not glue the digit onto the preceding word.
+    assert normalize_financial_slang("Pay Sam fiver") == "Pay Sam 5"
+
+
+def test_financial_slang_digit_prefixed_multiplier():
+    from financial_slang import normalize_financial_slang
+    assert normalize_financial_slang("Pay Sam 5 grand") == "Pay Sam 5000"
+    assert normalize_financial_slang("Pay 2.5 grand to Sam") == "Pay 2500 to Sam"
+
+
+def test_financial_slang_digit_prefixed_unit_keeps_the_digit():
+    from financial_slang import normalize_financial_slang
+    # "20 bucks" names a currency, like "20 dollars" -- the digit is the
+    # amount; the word must not also be read as a second amount ("20 1").
+    assert normalize_financial_slang("Pay 20 bucks to Dave") == "Pay 20 to Dave"
+
+
+def test_financial_slang_does_not_touch_unrelated_words():
+    from financial_slang import normalize_financial_slang
+    assert normalize_financial_slang("Pay Grandview Realty 50") == "Pay Grandview Realty 50"
+    assert normalize_financial_slang("Pay 12 to John") == "Pay 12 to John"
+
+
+def test_parse_text_command_understands_financial_slang():
+    from intent_parser import parse_text_command
+    result = parse_text_command("Pay Sam a fiver")
+    assert result.ok is True
+    assert result.intent.amount == 5.0
+    assert result.intent.payee_name == "Sam"
+
+    # No "to"/"on" preposition and a trailing "for X" is pre-existing,
+    # declared parser behavior (unrelated to slang): "for X" resolves as
+    # the payee target, same as "Pay Sam 1000 for rent" would. "to" avoids it.
+    result = parse_text_command("Send a tenner to Alice for lunch")
+    assert result.ok is True
+    assert result.intent.amount == 10.0
+    assert result.intent.payee_name == "Alice"
+    assert result.intent.note == "lunch"
+
+
+def test_pay_command_with_financial_slang_end_to_end(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    session_id = _new_session(client)
+    _add_contact(client, "Sam")
+    _add_default_payment_method(client)
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay Sam a fiver"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["intent"]["amount"] == 5.0
+    assert body["decision"]["decision"] == "PROCEED"
+
+
+# --- Multi-agent support chat: spending summary tool ----------------------------
+
+def test_spending_summary_tool_sums_succeeded_payments_by_rail(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    monkeypatch.setattr(main, "create_payment_intent", _fake_payment_intent)
+    session_id = _new_session(client)
+    _add_contact(client, "Gail")
+    _add_default_payment_method(client)
+
+    def _pay(text):
+        r = client.post("/command/text", json={"session_id": session_id, "text": text})
+        body = r.json()
+        assert body["ok"] is True, body
+        conf_id = body["confirmation"]["confirmation_id"]
+        client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": conf_id, "phrase": "CONFIRM"})
+        client.post("/pay/execute", json={"session_id": session_id, "txn_id": body["txn_id"]})
+
+    tools = {t.name: t for t in support_chat._transactions_tools()}
+    assert "No completed payments in the last 30 days." in tools["spending_summary"].invoke({})
+
+    _pay("Pay 10 to Gail")
+    _pay("Pay 15 to Gail again")  # bypasses the duplicate guardrail
+
+    summary_text = tools["spending_summary"].invoke({})
+    assert "AUD 25.00" in summary_text
+    assert "peer-to-peer" in summary_text
+
+
+def test_spending_summary_excludes_unsuccessful_payments(client, monkeypatch):
+    _mock_connect_flow(monkeypatch)
+    session_id = _new_session(client)
+    _add_contact(client, "Hank")
+    _add_default_payment_method(client)
+
+    r = client.post("/command/text", json={"session_id": session_id, "text": "Pay 10 to Hank"})
+    body = r.json()
+    conf_id = body["confirmation"]["confirmation_id"]
+    client.post("/confirm/normal", json={"session_id": session_id, "confirmation_id": conf_id, "phrase": "CONFIRM"})
+    # Never executed -- still "confirmed", not "succeeded" -- must not count as spending.
+
+    from users_repo import DEMO_USER_ID
+    from transactions_repo import spending_summary
+    summary = spending_summary(DEMO_USER_ID, days=30)
+    assert summary["count"] == 0

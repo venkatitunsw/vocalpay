@@ -69,7 +69,7 @@ ROUTE_KEYWORDS = {
     "transactions": (
         "transaction", "transactions", "payment history", "last payment", "last transfer",
         "balance", "receipt", "txn", "status of", "did it go through", "did it arrive",
-        "receiver", "received",
+        "receiver", "received", "how much have i spent", "spending", "spent this",
     ),
     "bills": (
         "bpay", "biller", "bill", "bills", "invoice", "invoices", "provider", "providers",
@@ -90,11 +90,11 @@ ACCOUNT_SYSTEM_PROMPT = (
 )
 TRANSACTIONS_SYSTEM_PROMPT = (
     "You are VocalPay's transactions specialist. You look up the user's payment history, a specific "
-    "transaction's status, and a contact's real Stripe receiver balance (to confirm they actually got "
-    "paid) -- using your tools, never guessing or inventing an amount, status, or date. You cannot move "
-    "money yourself; if asked to pay or send money, tell the user to type a payment command directly in "
-    "the chat (e.g. 'Pay 12 to John'). Keep answers short and conversational, and always state amounts "
-    "with their currency."
+    "transaction's status, a contact's real Stripe receiver balance (to confirm they actually got paid), "
+    "and how much they've actually spent recently (broken down by peer-to-peer/BPAY/bills) -- using your "
+    "tools, never guessing or inventing an amount, status, or date. You cannot move money yourself; if "
+    "asked to pay or send money, tell the user to type a payment command directly in the chat (e.g. 'Pay "
+    "12 to John'). Keep answers short and conversational, and always state amounts with their currency."
 )
 BILLS_SYSTEM_PROMPT = (
     "You are VocalPay's bills specialist. You know the user's open and paid service-provider invoices "
@@ -360,7 +360,23 @@ def _transactions_tools():
         total = (balance["available_cents"] + balance["pending_cents"]) / 100
         return f"{payee['nickname']} has {balance['currency'].upper()} {total:.2f} in their Stripe balance."
 
-    return [recent_transactions, transaction_status, check_receiver_balance]
+    @tool
+    def spending_summary(days: int = 30) -> str:
+        """Total amount actually paid (succeeded payments only) in the last N days, broken down by rail (peer-to-peer, BPAY, service bills)."""
+        from transactions_repo import spending_summary as _spending_summary
+        summary = _spending_summary(DEMO_USER_ID, days=days)
+        if summary["count"] == 0:
+            return f"No completed payments in the last {days} days."
+        total = summary["total_cents"] / 100
+        lines = [f"Total spent in the last {days} days: AUD {total:.2f} across {summary['count']} payment(s)."]
+        rail_labels = {"payid": "peer-to-peer", "bpay": "BPAY", "service": "service bills"}
+        for r in summary["by_rail"]:
+            rail_total = r["total_cents"] / 100
+            label = rail_labels.get(r["rail"], r["rail"])
+            lines.append(f"- {label}: {r['currency']} {rail_total:.2f} ({r['n']} payment(s))")
+        return "\n".join(lines)
+
+    return [recent_transactions, transaction_status, check_receiver_balance, spending_summary]
 
 
 def _bills_tools():

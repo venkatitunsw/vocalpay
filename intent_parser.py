@@ -1,6 +1,7 @@
 import re
 from typing import Optional
 from models import PaymentIntentParsed
+from financial_slang import normalize_financial_slang
 
 VERB_RE = re.compile(r"^\s*(pay|send|transfer)\b", re.IGNORECASE)
 
@@ -49,11 +50,12 @@ def parse_text_command(text: str) -> ParseResult:
       - "Pay 4 to Ava Hill PayID: 0427 499 675"        (name + explicit PayID disambiguates which one)
       - "Pay 4 to Ava Hill (0427 499 675)"
       - "Send John 12 aud"                             (no preposition at all: verb, name, amount)
+      - "Pay Sam a fiver"                               (financial amount slang -- see financial_slang.py)
     """
     if not text or len(text.strip()) < 3:
         return ParseResult(False, error="Empty or too short command")
 
-    raw = text.strip()
+    raw = normalize_financial_slang(text.strip())
 
     if not VERB_RE.match(raw):
         return ParseResult(False, error="Could not parse command. Try: 'Pay 12 to John'")

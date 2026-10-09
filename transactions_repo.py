@@ -120,6 +120,35 @@ def list_recent_transactions(user_id: str, limit: int = 5) -> list[dict]:
     finally:
         conn.close()
 
+
+def spending_summary(user_id: str, days: int = 30) -> dict:
+    """
+    Total of everything actually paid (status='succeeded' -- a pending or
+    failed attempt never moved money, so it doesn't count as spending) in
+    the last `days`, broken down by rail. Used by the support chatbot's
+    transactions specialist to answer "how much have I spent this month"
+    without it inventing a number -- a real SUM over the real ledger, not
+    an LLM's guess.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT rail, COUNT(*) AS n, SUM(amount_cents) AS total_cents, currency
+            FROM transactions
+            WHERE user_id=? AND status='succeeded' AND created_at>=?
+            GROUP BY rail, currency
+            """,
+            (user_id, cutoff),
+        ).fetchall()
+        by_rail = [dict(r) for r in rows]
+        total_cents = sum(r["total_cents"] for r in by_rail)
+        count = sum(r["n"] for r in by_rail)
+        return {"days": days, "total_cents": total_cents, "count": count, "by_rail": by_rail}
+    finally:
+        conn.close()
+
 from db import get_conn
 
 def set_stripe_payment_intent(txn_id: str, payment_intent_id: str, status: str) -> None:
