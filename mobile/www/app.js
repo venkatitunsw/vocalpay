@@ -38,6 +38,8 @@ const composer = document.getElementById("composer");
 const composerFooter = document.getElementById("composer-footer");
 const threadListView = document.getElementById("thread-list-view");
 const threadList = document.getElementById("thread-list");
+const threadSearchInput = document.getElementById("thread-search");
+const privateSectionBtn = document.getElementById("private-section-btn");
 const threadBackBtn = document.getElementById("thread-back-btn");
 const headerTitle = document.getElementById("header-title");
 const headerSubtitle = document.getElementById("header-subtitle");
@@ -122,7 +124,7 @@ function appendUserBubble(text, opts = {}) {
   const el = document.createElement("div");
   el.className = "flex justify-end";
   el.innerHTML = `
-    <div class="max-w-[80%] bg-emerald-500 text-slate-950 rounded-2xl rounded-br-sm px-4 py-2.5 text-sm font-medium">
+    <div class="max-w-[80%] bg-blue-600 text-white rounded-2xl rounded-br-sm px-4 py-2.5 text-sm font-medium">
       ${VocalPrivacy.sens(escapeHtml(text))}
     </div>`;
   feed.appendChild(el);
@@ -234,35 +236,49 @@ function threadRowHtml(t) {
     </div>`;
 }
 
+// Cached so the search box can re-filter instantly on every keystroke
+// without re-querying IndexedDB each time; refreshed by each render.
+let _threadListCache = [];
+let _inPrivateSection = false;
+
+function applyThreadSearchFilter() {
+  const q = threadSearchInput.value.trim().toLowerCase();
+  const rows = q ? _threadListCache.filter((t) => t.label.toLowerCase().includes(q)) : _threadListCache;
+  const backBtnHtml = _inPrivateSection
+    ? `<button type="button" id="private-back-btn" class="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition mb-1 text-slate-400 text-sm">
+         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M15.7 4.3a1 1 0 0 1 0 1.4L9.41 12l6.3 6.3a1 1 0 0 1-1.42 1.4l-7-7a1 1 0 0 1 0-1.4l7-7a1 1 0 0 1 1.42 0Z"/></svg>
+         Back to Chats
+       </button>`
+    : "";
+  const emptyHtml = _inPrivateSection
+    ? '<p class="text-xs text-slate-500 px-3 py-2">No private chats yet. Tap the lock on any chat to hide it here.</p>'
+    : "";
+  threadList.innerHTML = backBtnHtml + (rows.length ? rows.map(threadRowHtml).join("") : emptyHtml);
+}
+
 async function renderThreadList() {
   if (!window.VPOffline) return;
-  const threads = await window.VPOffline.listThreads();
-  threadList.innerHTML =
-    threads.map(threadRowHtml).join("") +
-    `<button type="button" id="private-section-btn" class="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-slate-800 text-left transition mt-2 border-t border-slate-800">
-       <div class="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center shrink-0 text-slate-400">${LOCK_ICON_SVG}</div>
-       <div class="text-sm font-medium text-slate-300">Private</div>
-     </button>`;
+  _inPrivateSection = false;
+  privateSectionBtn.classList.remove("hidden");
+  _threadListCache = await window.VPOffline.listThreads();
+  applyThreadSearchFilter();
 }
 
 async function renderHiddenThreadList() {
-  const threads = await window.VPOffline.listHiddenThreads();
-  threadList.innerHTML =
-    `<button type="button" id="private-back-btn" class="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition mb-1 text-slate-400 text-sm">
-       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M15.7 4.3a1 1 0 0 1 0 1.4L9.41 12l6.3 6.3a1 1 0 0 1-1.42 1.4l-7-7a1 1 0 0 1 0-1.4l7-7a1 1 0 0 1 1.42 0Z"/></svg>
-       Back to Chats
-     </button>` +
-    (threads.length
-      ? threads.map(threadRowHtml).join("")
-      : '<p class="text-xs text-slate-500 px-3 py-2">No private chats yet. Tap the lock on any chat to hide it here.</p>');
+  _inPrivateSection = true;
+  privateSectionBtn.classList.add("hidden");
+  _threadListCache = await window.VPOffline.listHiddenThreads();
+  applyThreadSearchFilter();
 }
 
+threadSearchInput.addEventListener("input", applyThreadSearchFilter);
+
+privateSectionBtn.addEventListener("click", async () => {
+  const ok = await VocalPrivacy.authenticateBiometric("View private chats");
+  if (ok) renderHiddenThreadList();
+});
+
 threadList.addEventListener("click", async (e) => {
-  if (e.target.closest("#private-section-btn")) {
-    const ok = await VocalPrivacy.authenticateBiometric("View private chats");
-    if (ok) renderHiddenThreadList();
-    return;
-  }
   if (e.target.closest("#private-back-btn")) {
     renderThreadList();
     return;
@@ -650,7 +666,6 @@ const RAIL_STYLE = {
 };
 
 async function handleServiceCommandResponse(res) {
-  appendAssistantBubble(res.read_back, { sensitive: true });
   await renderConfirmationCard(
     {
       intent: { amount: res.invoice.amount_cents / 100, currency: res.invoice.currency, payee_name: res.invoice.provider_name, note: null },
@@ -677,7 +692,6 @@ async function handleBpayCommandResponse(res, originalText) {
     }
     return;
   }
-  appendAssistantBubble(res.read_back, { sensitive: true });
   await renderConfirmationCard(
     {
       intent: { amount: res.parsed.amount, currency: "AUD", payee_name: res.biller.biller_name, note: null },
@@ -746,7 +760,6 @@ async function handleCommandResponse(res, originalText) {
     return;
   }
 
-  appendAssistantBubble(res.read_back, { sensitive: true });
   await renderConfirmationCard(res);
 }
 
@@ -879,6 +892,25 @@ async function renderConfirmationCard(cmdRes, opts = {}) {
     }
   }
 
+  // Already inside this exact contact's (or biller's) own thread -- the
+  // header above already names and shows an avatar for them, so repeating
+  // "→ Name" (and their PayID) on every single card in their own chat is
+  // noise, the same way a WhatsApp thread doesn't re-print the other
+  // person's name on every message bubble. Elsewhere (General, or a
+  // different thread -- the global-shortcut case), the name is the only
+  // thing telling you who's being paid, so it still shows.
+  const alreadyInOwnThread = draftThreadKey && draftThreadKey === state.activeThreadKey;
+  // Same reasoning extends to the "Confirm: Pay AUD X to Name..." bubble
+  // the card always used to be preceded by: inside their own thread, the
+  // card right below it already says exactly that. Elsewhere, it's the
+  // only text naming who's being paid before the card renders.
+  if (!alreadyInOwnThread && cmdRes.read_back) {
+    appendAssistantBubble(cmdRes.read_back, { sensitive: true });
+  }
+  const amountLine = alreadyInOwnThread
+    ? `<div class="text-lg font-semibold">${money(intent.amount, intent.currency)}</div>`
+    : `<div class="text-lg font-semibold">${money(intent.amount, intent.currency)} → ${VocalPrivacy.sens(escapeHtml(intent.payee_name))}</div>`;
+
   const header = `
     <div class="flex items-center justify-between">
       <span class="text-xs uppercase tracking-wide ${railStyle.text}">${railStyle.label}</span>
@@ -886,8 +918,8 @@ async function renderConfirmationCard(cmdRes, opts = {}) {
         ${required === "pin" ? "PIN required" : "Type CONFIRM"}
       </span>
     </div>
-    <div class="text-lg font-semibold">${money(intent.amount, intent.currency)} → ${VocalPrivacy.sens(escapeHtml(intent.payee_name))}</div>
-    ${payee && payee.phone_number ? `<div class="text-xs text-slate-400 font-mono">PayID: ${escapeHtml(payee.phone_number)}</div>` : ""}
+    ${amountLine}
+    ${!alreadyInOwnThread && payee && payee.phone_number ? `<div class="text-xs text-slate-400 font-mono">PayID: ${escapeHtml(payee.phone_number)}</div>` : ""}
     ${intent.note ? `<div class="text-xs text-slate-400">"${escapeHtml(intent.note)}"</div>` : ""}
     ${
       payee && !payee.has_receiver_tracking
@@ -898,7 +930,7 @@ async function renderConfirmationCard(cmdRes, opts = {}) {
       payee && payee.has_receiver_tracking && payee.is_saved_contact === false
         ? `<div class="save-contact-row flex items-center justify-between gap-2 text-[11px] bg-slate-900/60 border border-slate-700 rounded-lg px-2.5 py-2">
              <span class="text-slate-400">Not saved to your contacts — this payment will still go through.</span>
-             <button type="button" class="save-contact-btn shrink-0 text-emerald-400 hover:text-emerald-300 font-medium underline underline-offset-2" data-payee-id="${payee.payee_id}">Save contact</button>
+             <button type="button" class="save-contact-btn shrink-0 text-blue-400 hover:text-blue-300 font-medium underline underline-offset-2" data-payee-id="${payee.payee_id}">Save contact</button>
            </div>`
         : ""
     }
@@ -950,8 +982,8 @@ function normalFormHtml() {
   return `
     <form class="normal-form flex items-center gap-2">
       <input type="text" placeholder="Type CONFIRM"
-        class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500 uppercase placeholder:normal-case" />
-      <button type="submit" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-medium px-4 py-2 rounded-lg transition">
+        class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 uppercase placeholder:normal-case" />
+      <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition">
         Confirm
       </button>
     </form>
@@ -964,7 +996,7 @@ function pinFormHtml() {
     <form class="pin-form space-y-2">
       <div class="flex gap-2">
         ${[0, 1, 2, 3].map((i) => `<input class="pin-box" type="password" inputmode="numeric" maxlength="1" data-idx="${i}" />`).join("")}
-        <button type="submit" class="ml-auto bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-medium px-4 py-2 rounded-lg transition self-center">
+        <button type="submit" class="ml-auto bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition self-center">
           Confirm
         </button>
       </div>
@@ -1101,7 +1133,7 @@ async function handleConfirmResult(card, form, feedback, res, txnId, executeEndp
   }
 
   const payBtn = document.createElement("button");
-  payBtn.className = "w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold py-2.5 rounded-lg transition";
+  payBtn.className = "w-full bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold py-2.5 rounded-lg transition";
   payBtn.textContent = "Pay now";
   payBtn.addEventListener("click", () => executePayment(card, payBtn, txnId, executeEndpoint));
   card.appendChild(payBtn);
@@ -1374,7 +1406,10 @@ async function loadPayees() {
     // The Setup drawer is an overlay, not a navigation -- a contact added
     // or imported there wouldn't otherwise show up as a thread until some
     // unrelated screen change happened to re-render the list.
-    if (window.VPOffline && !threadListView.classList.contains("hidden")) renderThreadList();
+    if (window.VPOffline && !threadListView.classList.contains("hidden")) {
+      if (_inPrivateSection) renderHiddenThreadList();
+      else renderThreadList();
+    }
   } catch (err) {
     payeeList.innerHTML = `<p class="text-rose-400 text-xs">Failed to load: ${escapeHtml(err.message)}</p>`;
   }
@@ -1401,11 +1436,11 @@ function renderPayeeList(payees) {
         <form class="payid-add-form mt-1.5 flex items-center gap-1.5">
           <label class="sr-only" for="payid-input-${p.payee_id}">Add a PayID for ${escapeHtml(p.nickname)}</label>
           <input id="payid-input-${p.payee_id}" type="text" placeholder="Another mobile, email or ABN"
-            class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-[11px] outline-none focus:ring-2 focus:ring-emerald-500" />
+            class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-[11px] outline-none focus:ring-2 focus:ring-blue-500" />
           <button type="submit" class="text-[11px] px-2 py-1 rounded-md border border-slate-700 hover:bg-slate-800 whitespace-nowrap">Add PayID</button>
         </form>
         <p class="payid-feedback text-[11px] h-4 mt-0.5"></p>
-        ${tracked ? `<button class="check-balance-btn text-emerald-400 hover:text-emerald-300 mt-1 underline underline-offset-2" data-payee-id="${p.payee_id}">Check receiver balance</button>
+        ${tracked ? `<button class="check-balance-btn text-blue-400 hover:text-blue-300 mt-1 underline underline-offset-2" data-payee-id="${p.payee_id}">Check receiver balance</button>
         <div class="balance-result text-slate-400 mt-1"></div>` : ""}
       </div>`;
     })
@@ -1533,7 +1568,7 @@ function renderDuplicateNameConflict(container, res, nickname, onResolve) {
   container.innerHTML = `
     <div class="text-amber-400 mb-1">${escapeHtml(res.error)}</div>
     <div class="flex flex-wrap gap-x-2 gap-y-1 items-center">
-      <button type="button" class="conflict-same text-emerald-400 hover:text-emerald-300 underline underline-offset-2">Same person — add as another number</button>
+      <button type="button" class="conflict-same text-blue-400 hover:text-blue-300 underline underline-offset-2">Same person — add as another number</button>
       <span class="text-slate-600">|</span>
       <button type="button" class="conflict-diff-toggle text-sky-400 hover:text-sky-300 underline underline-offset-2">Different person — rename</button>
     </div>

@@ -56,10 +56,11 @@ body.locked .sens { filter: blur(6px) !important; }
 html.hc, html.hc body { background: #000 !important; color: #fff !important; }
 html.hc [class*="bg-slate-9"], html.hc [class*="bg-slate-8"], html.hc [class*="bg-slate-5"] { background-color: #000 !important; }
 html.hc [class*="text-slate-"], html.hc [class*="text-emerald-"], html.hc [class*="text-rose-"],
-html.hc [class*="text-amber-"], html.hc [class*="text-indigo-"], html.hc [class*="text-sky-"] { color: #fff !important; }
+html.hc [class*="text-amber-"], html.hc [class*="text-indigo-"], html.hc [class*="text-sky-"],
+html.hc [class*="text-blue-"] { color: #fff !important; }
 html.hc [class*="border-"] { border-color: #fff !important; }
 html.hc button, html.hc input, html.hc textarea, html.hc select { border: 1px solid #fff !important; }
-html.hc [class*="bg-emerald-500"] { background-color: #6ee7b7 !important; color: #000 !important; }
+html.hc [class*="bg-emerald-500"], html.hc [class*="bg-blue-600"] { background-color: #6ee7b7 !important; color: #000 !important; }
 html.hc .sens:not(.revealed) { background: #333 !important; }
 
 /* Light theme (default). Remaps the dark Tailwind palette used across the app. Add class "dark" on <html> to restore it. */
@@ -79,6 +80,7 @@ html:not(.dark) .text-indigo-300 { color: #4338ca !important; }
 html:not(.dark) .text-amber-200, html:not(.dark) .text-amber-300 { color: #92400e !important; }
 html:not(.dark) .text-rose-200, html:not(.dark) .text-rose-300, html:not(.dark) .text-rose-400 { color: #9f1239 !important; }
 html:not(.dark) .text-sky-400\/80, html:not(.dark) .text-sky-400 { color: #0369a1 !important; }
+html:not(.dark) .text-blue-400, html:not(.dark) .text-blue-300 { color: #1d4ed8 !important; }
 html:not(.dark) .bg-emerald-950 { background-color: #ecfdf5 !important; }
 html:not(.dark) .bg-rose-950 { background-color: #fff1f2 !important; }
 html:not(.dark) .bg-indigo-950 { background-color: #eef2ff !important; }
