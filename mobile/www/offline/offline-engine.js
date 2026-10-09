@@ -754,20 +754,20 @@
       return { ok: true, txn_id: conf.txn_id };
     }
 
-    let mm = m("/payees/\\{id\\}/payids");
+    let mm = m("/payees/{id}/payids");
     if (mm && method === "GET") return { payids: await listPayids(mm[0]) };
     if (mm && method === "POST") {
       if (!(await getPayee(mm[0]))) return { ok: false, error: "Unknown contact" };
       return await addPayid(DEMO_USER_ID, mm[0], body.value, body.label);
     }
-    mm = m("/payees/\\{id\\}/balance");
+    mm = m("/payees/{id}/balance");
     if (mm && method === "GET") {
       const payee = await getPayee(mm[0]);
       if (!payee) return { ok: false, error: "Payee not found" };
       if (!payee.stripe_connected_account_id) return { ok: false, error: "This payee has no receiver account to check" };
       return { ok: true, payee_id: mm[0], ...mockBalanceFor(payee.stripe_connected_account_id) };
     }
-    mm = m("/payees/\\{id\\}/save_as_contact");
+    mm = m("/payees/{id}/save_as_contact");
     if (mm && method === "POST") {
       const payee = await getPayee(mm[0]);
       if (!payee) return { ok: false, error: "Payee not found" };
