@@ -89,11 +89,27 @@
   }
 
   // Spoken replies: in private mode the spoken text never includes the hidden details.
+  //
+  // Android's System WebView (what this app runs in) exposes window.speechSynthesis
+  // but on most devices speak() is a silent no-op — the Web Speech Synthesis API
+  // isn't actually implemented there, only in the standalone Chrome app. The
+  // @capacitor-community/text-to-speech plugin wraps Android's native TextToSpeech
+  // service instead, which does work from a WebView. Use it when present (the
+  // installed app); fall back to the Web Speech API otherwise (the server build,
+  // opened in a real desktop/mobile browser, where it does work).
   function speak(text) {
-    if (!prefs.speak || !("speechSynthesis" in window)) return;
+    if (!prefs.speak) return;
     const line = prefs.privateMode ? "Reply hidden. Reveal it on screen to hear the details." : text;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
+    const NativeTTS = window.Capacitor?.Plugins?.TextToSpeech;
+    if (NativeTTS) {
+      NativeTTS.stop().catch(() => {});
+      NativeTTS.speak({ text: line }).catch(() => {});
+      return;
+    }
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(line));
+    }
   }
 
   document.addEventListener("click", (e) => {

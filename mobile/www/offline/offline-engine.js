@@ -860,6 +860,13 @@
     if (method === "POST" && path === "/services/command") {
       return { ok: false, error: "Service bill payments aren't available in the offline app yet." };
     }
+    if (method === "GET" && path === "/webauthn/credentials") {
+      // The Setup drawer always lists credentials on load and reads
+      // res.credentials.length unguarded — an {ok:false} stub here throws
+      // inside renderPasskeyList and surfaces as a generic "Failed to load".
+      // An empty list renders the normal "No passkeys yet" state instead.
+      return { credentials: [] };
+    }
     if (path.startsWith("/webauthn/") || path === "/confirm/passkey") {
       return { ok: false, error: "Passkeys aren't available in the offline app — use your PIN instead." };
     }

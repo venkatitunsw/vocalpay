@@ -81,6 +81,8 @@ html:not(.dark) .text-rose-200, html:not(.dark) .text-rose-300, html:not(.dark) 
 html:not(.dark) .text-sky-400\/80, html:not(.dark) .text-sky-400 { color: #0369a1 !important; }
 html:not(.dark) .bg-emerald-950 { background-color: #ecfdf5 !important; }
 html:not(.dark) .bg-rose-950 { background-color: #fff1f2 !important; }
+html:not(.dark) .bg-indigo-950 { background-color: #eef2ff !important; }
+html:not(.dark) .bg-amber-950 { background-color: #fffbeb !important; }
 html:not(.dark) .border-emerald-800 { border-color: #6ee7b7 !important; }
 html:not(.dark) .border-rose-800 { border-color: #fda4af !important; }
 html:not(.dark) .pin-box { background: #ffffff; color: #0f172a; border-color: #cbd5e1; }

@@ -442,10 +442,13 @@ function focusPendingCardOrComposer() {
 const SERVICE_HINT_RE = /\b(bill|invoice|top[- ]?up|telstra|agl|opal|sydney water|dr smith)\b/i;
 
 // Colour per payment rail: emerald = peer to peer, indigo = service provider, amber = BPAY.
+// Both the left edge (border) and the card's own background are tinted — a
+// border alone is a thin 4px strip that's easy to miss, especially against
+// the light theme's near-white default card background.
 const RAIL_STYLE = {
-  payid: { label: "Peer to peer", border: "border-emerald-500", text: "text-emerald-300" },
-  service: { label: "Service provider", border: "border-indigo-500", text: "text-indigo-300" },
-  bpay: { label: "BPAY", border: "border-amber-500", text: "text-amber-300" },
+  payid: { label: "Peer to peer", border: "border-emerald-500", text: "text-emerald-300", bg: "bg-emerald-950" },
+  service: { label: "Service provider", border: "border-indigo-500", text: "text-indigo-300", bg: "bg-indigo-950" },
+  bpay: { label: "BPAY", border: "border-amber-500", text: "text-amber-300", bg: "bg-amber-950" },
 };
 
 async function handleServiceCommandResponse(res) {
@@ -632,7 +635,8 @@ function renderConfirmationCard(cmdRes, opts = {}) {
   const executeEndpoint = opts.executeEndpoint || "/pay/execute";
   const rail = opts.rail || "payid";
   const railStyle = RAIL_STYLE[rail] || RAIL_STYLE.payid;
-  card.classList.add("border-l-4", railStyle.border);
+  card.classList.remove("bg-slate-800");
+  card.classList.add("border-l-4", railStyle.border, railStyle.bg);
 
   state.activeDraft = {
     confirmationId: confirmation.confirmation_id,

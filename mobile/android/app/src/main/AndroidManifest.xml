@@ -41,4 +41,6 @@
     <!-- @capacitor-community/contacts ("Import from phone contacts" in Setup) -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <!-- Voice input (voice.js records then transcribes locally with Whisper) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 </manifest>
