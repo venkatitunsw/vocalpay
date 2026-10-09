@@ -41,6 +41,13 @@
     <!-- @capacitor-community/contacts ("Import from phone contacts" in Setup) -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
-    <!-- Voice input (voice.js records then transcribes locally with Whisper) -->
+    <!-- Voice input (voice.js records then transcribes locally with Whisper).
+         Capacitor's BridgeWebChromeClient requests RECORD_AUDIO and
+         MODIFY_AUDIO_SETTINGS together as one batch for a getUserMedia audio
+         request, and only grants the mic if every permission in that batch
+         comes back granted. An undeclared permission is reported as
+         ungranted even after the user accepts the dialog, which silently
+         fails the whole batch, so both must be declared. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 </manifest>

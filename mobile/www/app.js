@@ -844,6 +844,7 @@ async function handleConfirmResult(card, form, feedback, res, txnId, executeEndp
   if (!res.ok) {
     feedback.textContent = res.error || "Confirmation failed.";
     feedback.className = "feedback text-xs h-4 text-rose-400";
+    VocalPrivacy.speak(res.error || "Confirmation failed.");
     if (res.error && res.error.includes("Too many attempts")) {
       setFormBusy(form, true);
     }
@@ -855,6 +856,7 @@ async function handleConfirmResult(card, form, feedback, res, txnId, executeEndp
   confirmedNotice.className = "text-emerald-400 text-xs font-medium flex items-center gap-1.5";
   confirmedNotice.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4Z"/></svg>Confirmed`;
   form.replaceWith(confirmedNotice);
+  VocalPrivacy.speak("Confirmed. Ready to pay.");
   card.querySelectorAll(".use-passkey-btn").forEach((el) => el.remove());
 
   // Once confirmed, a correction/cancel typed in the composer no longer has
@@ -893,6 +895,7 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
           <div class="text-[11px] text-emerald-300 font-mono">${escapeHtml(res.simulated_reference)}</div>
           <div class="text-[10px] text-slate-400">${escapeHtml(res.note)}</div>
         </div>`;
+      VocalPrivacy.speak(`${railLabel} payment ${res.final_status}.`);
     } else if (res.ok) {
       payBtn.outerHTML = `
         <div class="bg-emerald-950 border border-emerald-800 rounded-lg px-3 py-2.5 text-sm space-y-2">
@@ -902,15 +905,18 @@ async function executePayment(card, payBtn, txnId, executeEndpoint) {
           </div>
           ${renderReceiverEvidence(res.receiver_evidence)}
         </div>`;
+      VocalPrivacy.speak(`Payment ${res.final_status}.`);
     } else {
       payBtn.outerHTML = `
         <div class="bg-rose-950 border border-rose-800 rounded-lg px-3 py-2.5 text-sm">
           <div class="text-rose-300 font-medium">${escapeHtml(res.error || "Payment failed")}</div>
           ${res.details ? `<div class="text-[11px] text-rose-400/80 mt-0.5">${escapeHtml(res.details)}</div>` : ""}
         </div>`;
+      VocalPrivacy.speak(res.error || "Payment failed.");
     }
   } catch (err) {
     payBtn.outerHTML = `<div class="bg-rose-950 border border-rose-800 rounded-lg px-3 py-2.5 text-sm text-rose-300">Request failed: ${escapeHtml(err.message)}</div>`;
+    VocalPrivacy.speak("Payment request failed.");
   } finally {
     refreshAuditIfOpen();
   }
