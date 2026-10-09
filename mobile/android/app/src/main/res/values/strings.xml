@@ -4,4 +4,6 @@
     <string name="title_activity_main">VocalPay</string>
     <string name="package_name">com.vocalpay.app</string>
     <string name="custom_url_scheme">com.vocalpay.app</string>
+    <!-- Referenced by @aparajita/capacitor-biometric-auth's AuthActivity (its own AndroidManifest.xml) -->
+    <string name="title_activity_auth_activity">Authenticate</string>
 </resources>

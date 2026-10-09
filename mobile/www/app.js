@@ -201,33 +201,87 @@ function timeAgoShort(iso) {
   return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
+const LOCK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4">
+  <path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm-3 8V7a3 3 0 1 1 6 0v3Z"/>
+</svg>`;
+
+function threadRowHtml(t) {
+  const initial = escapeHtml((t.label || "?").trim().charAt(0).toUpperCase() || "?");
+  const preview = t.last_message_preview
+    ? VocalPrivacy.sens(escapeHtml(t.last_message_preview))
+    : '<span class="text-slate-500">No messages yet — tap to say hello</span>';
+  const time = t.last_message_at
+    ? `<span class="text-[11px] text-slate-500 shrink-0">${timeAgoShort(t.last_message_at)}</span>`
+    : "";
+  const hideable = t.thread_key !== window.VPOffline.GENERAL_THREAD;
+  const toggleBtn = hideable
+    ? `<button type="button" class="thread-hide-toggle shrink-0 h-8 w-8 rounded-lg hover:bg-slate-700 flex items-center justify-center text-slate-500"
+         data-thread-key="${escapeHtml(t.thread_key)}" data-hidden="${t.hidden ? "1" : "0"}"
+         title="${t.hidden ? "Remove from Private" : "Hide this chat"}" aria-label="${t.hidden ? "Remove from Private" : "Hide this chat"}">${LOCK_ICON_SVG}</button>`
+    : "";
+  return `
+    <div class="flex items-center gap-1">
+      <button type="button" class="thread-item flex-1 min-w-0 flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition"
+        data-thread-key="${escapeHtml(t.thread_key)}" data-thread-label="${escapeHtml(t.label)}">
+        <div class="h-10 w-10 rounded-full bg-slate-700 flex items-center justify-center font-semibold text-sm shrink-0">${initial}</div>
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-medium truncate">${escapeHtml(t.label)}</div>
+          <div class="text-xs text-slate-400 truncate">${preview}</div>
+        </div>
+        ${time}
+      </button>
+      ${toggleBtn}
+    </div>`;
+}
+
 async function renderThreadList() {
   if (!window.VPOffline) return;
   const threads = await window.VPOffline.listThreads();
-  threadList.innerHTML = threads
-    .map((t) => {
-      const initial = escapeHtml((t.label || "?").trim().charAt(0).toUpperCase() || "?");
-      const preview = t.last_message_preview
-        ? VocalPrivacy.sens(escapeHtml(t.last_message_preview))
-        : '<span class="text-slate-500">No messages yet — tap to say hello</span>';
-      const time = t.last_message_at
-        ? `<span class="text-[11px] text-slate-500 shrink-0">${timeAgoShort(t.last_message_at)}</span>`
-        : "";
-      return `
-        <button type="button" class="thread-item w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition"
-          data-thread-key="${escapeHtml(t.thread_key)}" data-thread-label="${escapeHtml(t.label)}">
-          <div class="h-10 w-10 rounded-full bg-slate-700 flex items-center justify-center font-semibold text-sm shrink-0">${initial}</div>
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-medium truncate">${escapeHtml(t.label)}</div>
-            <div class="text-xs text-slate-400 truncate">${preview}</div>
-          </div>
-          ${time}
-        </button>`;
-    })
-    .join("");
+  threadList.innerHTML =
+    threads.map(threadRowHtml).join("") +
+    `<button type="button" id="private-section-btn" class="w-full flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-slate-800 text-left transition mt-2 border-t border-slate-800">
+       <div class="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center shrink-0 text-slate-400">${LOCK_ICON_SVG}</div>
+       <div class="text-sm font-medium text-slate-300">Private</div>
+     </button>`;
 }
 
-threadList.addEventListener("click", (e) => {
+async function renderHiddenThreadList() {
+  const threads = await window.VPOffline.listHiddenThreads();
+  threadList.innerHTML =
+    `<button type="button" id="private-back-btn" class="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl hover:bg-slate-800 text-left transition mb-1 text-slate-400 text-sm">
+       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M15.7 4.3a1 1 0 0 1 0 1.4L9.41 12l6.3 6.3a1 1 0 0 1-1.42 1.4l-7-7a1 1 0 0 1 0-1.4l7-7a1 1 0 0 1 1.42 0Z"/></svg>
+       Back to Chats
+     </button>` +
+    (threads.length
+      ? threads.map(threadRowHtml).join("")
+      : '<p class="text-xs text-slate-500 px-3 py-2">No private chats yet. Tap the lock on any chat to hide it here.</p>');
+}
+
+threadList.addEventListener("click", async (e) => {
+  if (e.target.closest("#private-section-btn")) {
+    const ok = await VocalPrivacy.authenticateBiometric("View private chats");
+    if (ok) renderHiddenThreadList();
+    return;
+  }
+  if (e.target.closest("#private-back-btn")) {
+    renderThreadList();
+    return;
+  }
+  const toggleBtn = e.target.closest(".thread-hide-toggle");
+  if (toggleBtn) {
+    const wasHidden = toggleBtn.dataset.hidden === "1";
+    if (wasHidden) {
+      // Revealing is already gated: you only reach a hidden row's toggle
+      // after authenticateBiometric() above, inside the Private section.
+      await window.VPOffline.setThreadHidden(toggleBtn.dataset.threadKey, false);
+      renderHiddenThreadList();
+    } else {
+      // Hiding needs no auth -- it's your own device; only *revealing* does.
+      await window.VPOffline.setThreadHidden(toggleBtn.dataset.threadKey, true);
+      renderThreadList();
+    }
+    return;
+  }
   const btn = e.target.closest(".thread-item");
   if (!btn) return;
   openThread(btn.dataset.threadKey, btn.dataset.threadLabel);
@@ -597,7 +651,7 @@ const RAIL_STYLE = {
 
 async function handleServiceCommandResponse(res) {
   appendAssistantBubble(res.read_back, { sensitive: true });
-  renderConfirmationCard(
+  await renderConfirmationCard(
     {
       intent: { amount: res.invoice.amount_cents / 100, currency: res.invoice.currency, payee_name: res.invoice.provider_name, note: null },
       txn_id: res.txn_id,
@@ -624,7 +678,7 @@ async function handleBpayCommandResponse(res, originalText) {
     return;
   }
   appendAssistantBubble(res.read_back, { sensitive: true });
-  renderConfirmationCard(
+  await renderConfirmationCard(
     {
       intent: { amount: res.parsed.amount, currency: "AUD", payee_name: res.biller.biller_name, note: null },
       txn_id: res.txn_id,
@@ -693,7 +747,7 @@ async function handleCommandResponse(res, originalText) {
   }
 
   appendAssistantBubble(res.read_back, { sensitive: true });
-  renderConfirmationCard(res);
+  await renderConfirmationCard(res);
 }
 
 function renderClarifyPickerCard(res) {
@@ -772,12 +826,37 @@ async function askSupportChat(message) {
 
 // --- Confirmation card (normal phrase or PIN) -----------------------------------
 
-function renderConfirmationCard(cmdRes, opts = {}) {
-  const card = appendCard();
+async function renderConfirmationCard(cmdRes, opts = {}) {
   const { intent, txn_id, confirmation, payee } = cmdRes;
+  const rail = opts.rail || "payid";
+
+  // A payment started from the general view still belongs in that
+  // contact's (or BPAY biller's) own thread, same as paying someone from
+  // a phone's main dial pad still lands in their message thread -- not
+  // just wherever the composer happened to be.
+  let draftThreadKey = null;
+  if (window.VPOffline) {
+    if (payee) draftThreadKey = window.VPOffline.payeeThreadKey(payee.payee_id);
+    else if (rail === "bpay" && cmdRes.biller) draftThreadKey = window.VPOffline.billerThreadKey(cmdRes.biller.biller_code);
+  }
+
+  // The global shortcut from the original Private Mode spec: paying into a
+  // hidden thread interrupts with a biometric/PIN prompt *before* any
+  // payment detail is shown, when the command came from somewhere else
+  // (General, or another thread). Already inside that hidden thread, no
+  // re-prompt -- reaching it at all already went through the Private
+  // section's own authenticateBiometric() check.
+  if (draftThreadKey && draftThreadKey !== state.activeThreadKey && (await window.VPOffline.isThreadHidden(draftThreadKey))) {
+    const ok = await VocalPrivacy.authenticateBiometric(`Pay ${intent.payee_name}`);
+    if (!ok) {
+      appendErrorBubble("Authentication required to pay a private contact.");
+      return;
+    }
+  }
+
+  const card = appendCard();
   const required = confirmation.required_confirmation;
   const executeEndpoint = opts.executeEndpoint || "/pay/execute";
-  const rail = opts.rail || "payid";
   const railStyle = RAIL_STYLE[rail] || RAIL_STYLE.payid;
   card.classList.remove("bg-slate-800");
   card.classList.add("border-l-4", railStyle.border, railStyle.bg);
@@ -790,22 +869,13 @@ function renderConfirmationCard(cmdRes, opts = {}) {
     cardEl: card,
   };
 
-  // A payment started from the general view still belongs in that
-  // contact's (or BPAY biller's) own thread, same as paying someone from
-  // a phone's main dial pad still lands in their message thread -- not
-  // just wherever the composer happened to be. card.dataset.threadKey
-  // (rather than state.activeDraft, which is cleared once confirmed)
-  // outlives confirmation/execution so later outcomes can still mirror
-  // into the right thread -- see mirrorBubble().
-  if (window.VPOffline) {
-    let draftThreadKey = null;
-    if (payee) draftThreadKey = window.VPOffline.payeeThreadKey(payee.payee_id);
-    else if (rail === "bpay" && cmdRes.biller) draftThreadKey = window.VPOffline.billerThreadKey(cmdRes.biller.biller_code);
-    if (draftThreadKey) {
-      card.dataset.threadKey = draftThreadKey;
-      if (draftThreadKey !== state.activeThreadKey && cmdRes.read_back) {
-        window.VPOffline.recordMessage(draftThreadKey, "assistant", cmdRes.read_back).catch(() => {});
-      }
+  // card.dataset.threadKey (rather than state.activeDraft, which is cleared
+  // once confirmed) outlives confirmation/execution so later outcomes can
+  // still mirror into the right thread -- see mirrorBubble().
+  if (draftThreadKey) {
+    card.dataset.threadKey = draftThreadKey;
+    if (draftThreadKey !== state.activeThreadKey && cmdRes.read_back) {
+      window.VPOffline.recordMessage(draftThreadKey, "assistant", cmdRes.read_back).catch(() => {});
     }
   }
 

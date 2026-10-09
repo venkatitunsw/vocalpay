@@ -19,4 +19,17 @@
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
         <item name="android:background">@drawable/splash</item>
     </style>
+
+    <!-- @aparajita/capacitor-biometric-auth's AuthActivity (its own
+         AndroidManifest.xml, merged by Gradle) references this theme by
+         name. It doesn't exist by default in a fresh Capacitor project,
+         so it's declared here; otherwise the build fails resolving it. -->
+    <style name="AppTheme.Transparent" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

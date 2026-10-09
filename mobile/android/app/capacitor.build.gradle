@@ -9,8 +9,10 @@ android {
 
 apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
 dependencies {
+    implementation project(':aparajita-capacitor-biometric-auth')
     implementation project(':capacitor-community-contacts')
     implementation project(':capacitor-community-text-to-speech')
+    implementation project(':capacitor-app')
 
 }
 

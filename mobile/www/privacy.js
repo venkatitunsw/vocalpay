@@ -112,6 +112,32 @@
     }
   }
 
+  // Private Mode's thread lock: gates revealing a hidden thread, or paying
+  // someone whose thread is hidden, behind the device's own biometric/PIN
+  // check. Native via @aparajita/capacitor-biometric-auth, bundled at
+  // vendor/biometric-auth.js (see mobile/README.md for how/why) -- loaded
+  // lazily, same pattern as voice.js's Whisper model. allowDeviceCredential
+  // lets a phone/emulator with no fingerprint or face enrolled fall back to
+  // its lock-screen PIN/pattern/password instead of failing outright.
+  // Returns false (never throws) on cancellation, failure, or the server
+  // build / a plain browser, where there's no native bridge to ask.
+  let _biometricAuthPromise = null;
+  function _loadBiometricAuth() {
+    if (!_biometricAuthPromise) _biometricAuthPromise = import("vendor/biometric-auth.js").then((m) => m.BiometricAuth);
+    return _biometricAuthPromise;
+  }
+
+  async function authenticateBiometric(reason) {
+    if (!window.Capacitor?.isNativePlatform?.()) return false;
+    try {
+      const BiometricAuth = await _loadBiometricAuth();
+      await BiometricAuth.authenticate({ reason: reason || "Unlock this chat", cancelTitle: "Cancel", allowDeviceCredential: true });
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
   document.addEventListener("click", (e) => {
     if (locked) {
       unlock();
@@ -146,6 +172,7 @@
     speak,
     applyPrefs,
     isPrivate: () => prefs.privateMode,
+    authenticateBiometric,
   };
   document.addEventListener("DOMContentLoaded", applyPrefs);
 })();

@@ -888,7 +888,16 @@
     const message_id = uuid();
     const created_at = nowIso();
     await DB.put("messages", { message_id, thread_key: threadKey, role, text, created_at });
-    await DB.put("threads", { thread_key: threadKey, last_message_at: created_at, last_message_preview: (text || "").slice(0, 140) });
+    // put() replaces the whole row -- read the existing one first so a new
+    // message in an already-hidden thread doesn't silently drop its hidden
+    // flag along with everything else.
+    const existing = await DB.get("threads", threadKey);
+    await DB.put("threads", {
+      thread_key: threadKey,
+      last_message_at: created_at,
+      last_message_preview: (text || "").slice(0, 140),
+      hidden: !!(existing && existing.hidden),
+    });
     return message_id;
   }
 
@@ -897,7 +906,17 @@
     return rows.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
   }
 
-  async function listThreads() {
+  function sortThreads(list) {
+    list.sort((a, b) => {
+      if (!a.last_message_at && !b.last_message_at) return a.label.localeCompare(b.label);
+      if (!a.last_message_at) return 1;
+      if (!b.last_message_at) return -1;
+      return a.last_message_at < b.last_message_at ? 1 : -1;
+    });
+    return list;
+  }
+
+  async function _allThreadEntries() {
     const [threadRows, payees] = await Promise.all([DB.getAll("threads"), DB.getAllByIndex("payees", "user_id", DEMO_USER_ID)]);
     const byKey = new Map(threadRows.map((t) => [t.thread_key, t]));
 
@@ -910,7 +929,7 @@
         const key = payeeThreadKey(p.payee_id);
         const t = byKey.get(key);
         return {
-          thread_key: key, label: p.nickname, payee_id: p.payee_id,
+          thread_key: key, label: p.nickname, payee_id: p.payee_id, hidden: !!(t && t.hidden),
           last_message_at: t ? t.last_message_at : null, last_message_preview: t ? t.last_message_preview : "",
         };
       });
@@ -920,30 +939,52 @@
       if (!key.startsWith("biller:")) continue;
       const biller = await lookupBiller(key.slice(7));
       billerThreads.push({
-        thread_key: key, label: biller ? biller.biller_name : key, biller_code: key.slice(7),
+        thread_key: key, label: biller ? biller.biller_name : key, biller_code: key.slice(7), hidden: !!t.hidden,
         last_message_at: t.last_message_at, last_message_preview: t.last_message_preview,
       });
     }
 
     const general = byKey.get(GENERAL_THREAD);
     const generalThread = {
-      thread_key: GENERAL_THREAD, label: "General",
+      thread_key: GENERAL_THREAD, label: "General", hidden: false, // General can never be hidden -- always somewhere to talk
       last_message_at: general ? general.last_message_at : null, last_message_preview: general ? general.last_message_preview : "",
     };
 
-    const all = [generalThread, ...contactThreads, ...billerThreads];
-    // No-messages-yet threads sort after everything with real history, most recent first.
-    all.sort((a, b) => {
-      if (!a.last_message_at && !b.last_message_at) return a.label.localeCompare(b.label);
-      if (!a.last_message_at) return 1;
-      if (!b.last_message_at) return -1;
-      return a.last_message_at < b.last_message_at ? 1 : -1;
+    return [generalThread, ...contactThreads, ...billerThreads];
+  }
+
+  async function listThreads() {
+    const all = await _allThreadEntries();
+    return sortThreads(all.filter((t) => !t.hidden));
+  }
+
+  // Private Mode: threads the user has explicitly hidden from the main
+  // list, revealed only behind authenticateBiometric() (privacy.js) --
+  // see "Private" in app.js's thread list.
+  async function listHiddenThreads() {
+    const all = await _allThreadEntries();
+    return sortThreads(all.filter((t) => t.hidden));
+  }
+
+  async function setThreadHidden(threadKey, hidden) {
+    if (threadKey === GENERAL_THREAD) return; // never hideable
+    const existing = await DB.get("threads", threadKey);
+    await DB.put("threads", {
+      thread_key: threadKey,
+      last_message_at: existing ? existing.last_message_at : null,
+      last_message_preview: existing ? existing.last_message_preview : "",
+      hidden: !!hidden,
     });
-    return all;
+  }
+
+  async function isThreadHidden(threadKey) {
+    const row = await DB.get("threads", threadKey);
+    return !!(row && row.hidden);
   }
 
   window.VPOffline = {
     handle, ready, DEMO_USER_ID,
     GENERAL_THREAD, payeeThreadKey, billerThreadKey, recordMessage, listMessages, listThreads,
+    listHiddenThreads, setThreadHidden, isThreadHidden,
   };
 })();

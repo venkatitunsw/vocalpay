@@ -50,4 +50,6 @@
          fails the whole batch, so both must be declared. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Private Mode's thread lock (biometric or device PIN/pattern/password) -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 </manifest>
