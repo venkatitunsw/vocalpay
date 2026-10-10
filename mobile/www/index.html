@@ -59,7 +59,7 @@
            Chats sits as its own fixed row below the scrollable list, not
            mixed in among contacts -- a single tap away, not part of the
            chat area itself. -->
-      <div id="thread-list-view" class="flex-1 min-h-0 flex flex-col max-w-2xl w-full mx-auto">
+      <main id="thread-list-view" aria-label="Chats" class="flex-1 min-h-0 flex flex-col max-w-2xl w-full mx-auto">
         <div class="px-4 pt-4 pb-2 shrink-0">
           <div class="relative">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
@@ -70,7 +70,7 @@
               class="w-full bg-slate-800 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500 placeholder:text-slate-400" />
           </div>
         </div>
-        <div id="thread-list" class="flex-1 overflow-y-auto px-4 pb-2 space-y-1" aria-label="Chats"></div>
+        <div id="thread-list" class="flex-1 overflow-y-auto px-4 pb-2 space-y-1"></div>
         <button type="button" id="private-section-btn"
           class="shrink-0 mx-4 mb-4 flex items-center gap-3 px-3 py-3 rounded-xl hover:bg-slate-800 text-left transition border-t border-slate-800 pt-4">
           <div class="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center shrink-0 text-slate-400">
@@ -83,7 +83,7 @@
             <div class="text-[11px] text-slate-500">Biometric or device PIN required</div>
           </div>
         </button>
-      </div>
+      </main>
 
       <!-- Message feed: one thread's conversation. Hidden while the thread list is showing. -->
       <main id="feed" aria-label="Conversation" aria-live="off" class="hidden flex-1 overflow-y-auto px-4 py-6 space-y-4 max-w-2xl w-full mx-auto"></main>
