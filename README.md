@@ -10,6 +10,10 @@ audio never leaves the device.
 
 **Live demo:** https://vocalpay.onrender.com
 
+For a full technical reference — every technology used, why, and the concepts behind the design (the
+deterministic payment pipeline, the multi-agent chatbot, the offline Android build, the testing methodology) —
+see [TECH_STACK.md](TECH_STACK.md).
+
 ## What it does
 
 - **Understands flexible phrasing**, not just one rigid template — `"Pay 12 to John for dinner"`,
